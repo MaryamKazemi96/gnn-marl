@@ -582,7 +582,26 @@ if __name__ == "__main__":
     print(f"  Observation keys: {list(obs.keys())}")
     print(f"  Action space: {env.action_space}")
     print(f"  Action mask shape: {info['action_mask'].shape}")
-    
+    obs, info = env.reset()
+
+    print("obs keys:", sorted(obs.keys()))
+    for k in ["x","node_mask","edge_index","edge_mask","cand_idx","cand_mask","action_mask"]:
+        if k in obs:
+            v = obs[k]
+            print(f"{k:10s} shape={getattr(v,'shape',None)} dtype={getattr(v,'dtype',None)}")
+
+    R = obs["x"].shape[0]
+    K = obs["cand_idx"].shape[1]
+
+    # check robot 0 only (enough to catch 90% of issues)
+    r = 0
+    n = int(obs["node_mask"][r].sum())
+    assert obs["node_mask"][r, 0] == 1, "Robot is not local node 0"
+    for kk in range(K):
+        if int(obs["cand_mask"][r, kk]) == 1:
+            idx = int(obs["cand_idx"][r, kk])
+            assert 0 <= idx < n, f"cand_idx out of range: {idx} >= {n}"
+    print("OK: basic ego-graph + candidate invariants")
     # Test step
     action = env.action_space.sample()
     obs, reward, terminated, truncated, info = env.step(action)
