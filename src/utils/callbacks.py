@@ -228,9 +228,21 @@ class FinalTaskAllocationCallback(BaseCallback):
                 self.logger.record(f"{k}_step", float(v))
                 self._ep_rew_sums[k] = self._ep_rew_sums.get(k, 0.0) + float(v)
             # episode end
-            if "episode_completed" in info:
-                completed = info.get("episode_completed", 0)
-                obsolete = info.get("episode_obsolete", 0)
+            # Support both the new key names (completed_count / obsolete_count)
+            # produced by MultiAgentTaskEnv and the legacy names.
+            _has_episode_end = (
+                "episode_completed" in info
+                or "completed_count" in info
+            )
+            if _has_episode_end:
+                completed = int(
+                    info.get("episode_completed",
+                             info.get("completed_count", 0))
+                )
+                obsolete = int(
+                    info.get("episode_obsolete",
+                             info.get("obsolete_count", 0))
+                )
 
                 self.episode_completions.append(completed)
                 self.episode_obsolete.append(obsolete)
