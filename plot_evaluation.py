@@ -51,9 +51,22 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
 from tensorboard.backend.event_processing import event_accumulator
 
-from src.environment.environment import MultiTaskAllocationEnv
-from src.environment.sb3_env_wrapper import WarehouseEnvSB3Final
-from src.models.sb3_gnn_policy import RTGNNPolicy
+# These legacy classes live in environment2.py and sb3_env_wrapper.py.
+# MultiTaskAllocationEnv is the OLD env used by make_env() below.
+# WarehouseEnvSB3Final and RTGNNPolicy are optional; if missing the eval
+# runner is disabled but all plotting functions still work.
+try:
+    from src.environment.environment2 import MultiTaskAllocationEnv
+except ImportError:
+    MultiTaskAllocationEnv = None  # type: ignore[assignment,misc]
+try:
+    from src.environment.sb3_env_wrapper import WarehouseEnvSB3Final  # type: ignore[attr-defined]
+except (ImportError, AttributeError):
+    WarehouseEnvSB3Final = None  # type: ignore[assignment,misc]
+try:
+    from src.models.sb3_gnn_policy import RTGNNPolicy  # type: ignore[import]
+except ImportError:
+    RTGNNPolicy = None  # type: ignore[assignment,misc]
 
 
 # ============================================================
@@ -106,16 +119,60 @@ def set_seed(seed: int) -> None:
 
 
 def make_env(config: Dict, seed: int):
-    env_cfg = config["environment"]
-    agents = np.load(env_cfg["agents_file"], allow_pickle=True)
+    """Build the evaluation environment.
 
+    Supports two env configs:
+    - New style (MultiAgentTaskEnv): config["environment"] has "data_dir"
+    - Legacy style (MultiTaskAllocationEnv): config["environment"] has "agents_file"
+
+    Falls back gracefully if legacy classes are unavailable.
+    """
+    from src.environment.environment import MultiAgentTaskEnv
+
+    env_cfg = config.get("environment", config)  # tolerate flat configs
+
+    # ---- New-style env (MultiAgentTaskEnv) ----
+    if "data_dir" in env_cfg:
+        data_dir = Path(env_cfg["data_dir"])
+        agents = np.load(data_dir / "agents.npy", allow_pickle=True)
+        batches: list = []
+        i = 0
+        while (data_dir / f"tasks_batch_{i}.npy").exists():
+            batches.append(np.load(data_dir / f"tasks_batch_{i}.npy", allow_pickle=True))
+            i += 1
+        env = MultiAgentTaskEnv(
+            agents=agents,
+            tasks_batches=batches,
+            K_max=env_cfg.get("K_max", 5),
+            N_max=env_cfg.get("N_max", 15),
+            E_max=env_cfg.get("E_max", 50),
+            use_xy_pickup=env_cfg.get("use_xy_pickup", False),
+            normalize_features=env_cfg.get("normalize_features", True),
+            use_node_type=env_cfg.get("use_node_type", True),
+            use_ego_robot=env_cfg.get("use_ego_robot", True),
+            use_edge_rt=env_cfg.get("use_edge_rt", False),
+            two_hop=env_cfg.get("two_hop", False),
+            vicinity_m=env_cfg.get("vicinity_m", 20.0),
+            max_steps=env_cfg.get("max_steps", 1000),
+        )
+        env = Monitor(env)
+        env.reset(seed=seed)
+        return env
+
+    # ---- Legacy env (MultiTaskAllocationEnv) ----
+    if MultiTaskAllocationEnv is None:
+        raise ImportError(
+            "Legacy MultiTaskAllocationEnv not available. "
+            "Add 'data_dir' to your config to use MultiAgentTaskEnv instead."
+        )
+    agents = np.load(env_cfg["agents_file"], allow_pickle=True)
     batches = []
-    for i in range(env_cfg["n_batches"]):
+    for i in range(env_cfg.get("n_batches", 0)):
         batch_file = Path(env_cfg["data_dir"]) / f"tasks_batch_{i}.npy"
         if batch_file.exists():
             batches.append(np.load(batch_file, allow_pickle=True))
 
-    base_env = MultiTaskAllocationEnv(
+    base_env = MultiTaskAllocationEnv(  # type: ignore[call-arg]
         agents_cont_coord_array=agents,
         task_cont_coord_array=batches,
         radius=env_cfg["radius"],
@@ -123,7 +180,9 @@ def make_env(config: Dict, seed: int):
         use_true_id=env_cfg["use_true_id"],
         all_batches=True,
     )
-    env = WarehouseEnvSB3Final(
+    if WarehouseEnvSB3Final is None:
+        raise ImportError("WarehouseEnvSB3Final not available in sb3_env_wrapper.py")
+    env = WarehouseEnvSB3Final(  # type: ignore[call-arg]
         base_env,
         assignment_interval=env_cfg["assignment_interval"],
         k_max=env_cfg.get("k_max", 5),
@@ -152,7 +211,15 @@ def run_evaluation(
     n_episodes: int,
     deterministic: bool,
 ) -> Dict[str, Any]:
-    """Run n_episodes with a loaded PPO checkpoint; return results dict."""
+    """Run n_episodes with a loaded PPO checkpoint; return results dict.
+
+    Requires RTGNNPolicy to be importable from src.models.sb3_gnn_policy.
+    """
+    if RTGNNPolicy is None:
+        raise ImportError(
+            "RTGNNPolicy could not be imported (src/models/sb3_gnn_policy.py missing). "
+            "Cannot run evaluation."
+        )
     set_seed(seed)
 
     env = make_env(config, seed=seed)
