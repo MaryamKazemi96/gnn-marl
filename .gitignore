@@ -1,0 +1,62 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# =========================
+# Virtual environments
+# =========================
+venv/
+.env/
+.env.*
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Logs & monitoring
+# =========================
+logs/
+*.log
+monitor.csv
+
+# =========================
+# Training runs / outputs
+# =========================
+runs/
+baseline_results/
+
+# =========================
+# Models & checkpoints
+# =========================
+models/
+*.zip
+*.pt
+*.pth
+*.ckpt
+
+# =========================
+# Data files (large)
+# =========================
+*.npy
+
+# (optional: keep config data)
+!configs/
+!data/  # remove this line if data is large and shouldn't be tracked
+
+# =========================
+# Plots / generated images
+# =========================
+*.png
+*.jpg
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db

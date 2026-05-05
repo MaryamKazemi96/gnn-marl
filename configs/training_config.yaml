@@ -1,0 +1,100 @@
+# # Experiment Configuration
+# experiment:
+#   name: "warehouse_ppo_15tasks"
+#   seed: 42
+#   device: "cpu"  # or "cuda"
+#   seeds: [42] #, 123, 456, 789, 1011]  # List of seeds for multiple runs
+
+# # Environment
+# environment:
+#   n_batches: 10
+#   n_robots: 6
+#   robot_capacity: 3
+#   radius: 20
+#   feature_size: 15
+#   assignment_interval: 50
+#   max_steps: 1500
+#   agents_file: "data/agents.npy"
+#   data_dir: "data"
+#   use_true_id: false
+#   reward_mode: "old"   # "old" or "new"
+
+# # GNN Architecture
+# model:
+#   gnn_type: "graphsage"  # or "gcn"
+#   hidden_dim: 128
+#   num_gnn_layers: 2
+#   activation: "relu"
+#   dropout: 0.0
+
+# # PPO Hyperparameters
+# ppo:
+#   n_steps: 1024  # Number of steps per update
+#   batch_size: 256
+#   n_epochs: 5
+#   gamma: 0.99
+#   gae_lambda: 0.95
+#   clip_range: 0.2
+#   clip_range_vf: null  # None means no clipping
+#   ent_coef: 0.01  # Entropy coefficient for exploration
+#   vf_coef: 0.35   # Value function coefficient
+#   max_grad_norm: 0.5
+#   learning_rate: 3.0e-4
+#   use_sde: false
+#   sde_sample_freq: -1
+
+# # Training
+# training:
+#   total_timesteps: 10  # Total environment steps
+#   save_freq: 50000  # Save model every N steps
+#   eval_freq: 50000  # Evaluate every N steps
+#   eval_episodes: 10
+#   log_interval: 1
+#   checkpoint_dir: "checkpoints_ppo"
+#   tensorboard_log: "tensorboard_logs"
+
+# features:
+#   base_dim: 9
+#   use_xy_pickup: false
+#   normalize_features: true
+#   use_node_type: true
+#   use_ego_robot: true
+#   use_edge_rt: true
+#   edge_features: [dx, dy, eta, is_ego_edge]
+#   robot_commitment: route_slots
+#   route_slots_k: 2
+
+  # GNN-PPO Training Configuration
+
+# Environment parameters
+num_robots: 3
+num_tasks: 15
+radius: 20
+batch_time: 180
+
+# Graph parameters
+K_max: 5              # Max candidate tasks per robot
+N_max: 15             # Max nodes in ego-graph
+E_max: 50             # Max edges in ego-graph
+
+# Feature parameters
+use_xy_pickup: false
+normalize_features: true
+use_node_type: true
+use_ego_robot: true
+use_edge_rt: false
+
+# 2-hop parameters
+two_hop: false
+
+# Decision making
+decision_interval: 8  # Steps between policy decisions
+
+# PPO parameters
+ppo_steps: 1024
+batch_size: 64
+learning_rate: 0.0003
+total_timesteps: 5000
+
+vicinity_m: 20
+max_steps: 1500
