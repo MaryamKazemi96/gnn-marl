@@ -67,10 +67,12 @@
   # GNN-PPO Training Configuration
 
 # Environment parameters
-num_robots: 3
-num_tasks: 15
-radius: 20
+num_robots: 4
+num_tasks: 40
+radius: 30
 batch_time: 180
+vicinity_m: 30
+
 
 # Graph parameters
 K_max: 5              # Max candidate tasks per robot
@@ -85,7 +87,7 @@ use_ego_robot: true
 use_edge_rt: false
 
 # 2-hop parameters
-two_hop: false
+two_hop: true
 
 # Decision making
 decision_interval: 8  # Steps between policy decisions
@@ -96,5 +98,4 @@ batch_size: 64
 learning_rate: 0.0003
 total_timesteps: 5000
 
-vicinity_m: 20
 max_steps: 1500

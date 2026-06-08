@@ -34,7 +34,6 @@ baseline_results/
 # =========================
 # Models & checkpoints
 # =========================
-models/
 *.zip
 *.pt
 *.pth

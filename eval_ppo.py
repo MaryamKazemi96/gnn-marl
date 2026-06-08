@@ -103,7 +103,7 @@ def make_env(agents, tasks, config, seed):
 # =========================================================
 
 def pick_model(run_dir: Path) -> Path:
-    model_dir = run_dir / "models"
+    model_dir = run_dir 
 
     models = list(model_dir.glob("*.zip"))
 

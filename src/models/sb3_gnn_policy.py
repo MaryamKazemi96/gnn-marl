@@ -1,290 +1,3 @@
-# """
-# Stable-Baselines3 policy wrapper for GNN-based actor-critic.
-# Integrates with PPO trainer and handles masked action sampling.
-# """
-# import torch as th
-# import torch.nn as nn
-# from typing import Any, Dict, Optional, List, Literal, cast, Tuple
-# from gymnasium import spaces
-# from stable_baselines3.common.policies import ActorCriticPolicy
-# from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-
-# from .actor_critic import EgoActorCritic
-
-
-# class DictPassthroughExtractor(BaseFeaturesExtractor):
-#     """
-#     Passthrough extractor that preserves raw dictionary observations.
-#     Returns dummy feature tensor to satisfy SB3 interface.
-#     """
-#     def __init__(self, observation_space: spaces.Dict):
-#         super().__init__(observation_space, features_dim=1)
-#         self.last_obs: Optional[Dict[str, th.Tensor]] = None
-    
-#     def forward(self, obs: Dict[str, th.Tensor]) -> th.Tensor:
-#         """Capture raw observation and return dummy features."""
-#         self.last_obs = obs
-#         any_tensor = next(iter(obs.values()))
-#         B = any_tensor.shape[0]
-#         return th.ones((B, 1), device=any_tensor.device, dtype=any_tensor.dtype)
-
-
-# class RTGNNPolicy(ActorCriticPolicy):
-#     """
-#     PPO-compatible policy using GNN-based actor-critic.
-    
-#     Key features:
-#     - Action space: MultiDiscrete [K_max+1] * R (K_max task choices + 1 NO-OP per robot)
-#     - Learnable NO-OP logit: Single shared parameter across all robots/batch
-#     - Masked action sampling: Respects cand_mask to allow only valid actions
-#     - Optional 2-hop architecture: Competitor-aware task selection
-#     """
-#     def __init__(
-#         self,
-#         *args,
-#         in_dim: int,
-#         hidden: int,
-#         k_max: int,
-#         logit_temperature: float = 5.0,
-#         noop_init: float = -1.0,
-#         freeze_noop_logit: bool = False,
-#         edge_dim: int = 0,
-#         use_competitor_fusion: bool = False,
-#         use_two_hop_actor: bool = False,
-#         use_two_hop_critic: bool = False,
-#         eta_index: int = -1,
-#         lambda_init: float = 0.0,
-#         backbone: str = "sage",
-#         critic_aggregation: str = "joint_mean",
-#         **kwargs,
-#     ):
-#         """Initialize policy."""
-#         gnn_kwargs: Dict[str, Any] = kwargs.pop("gnn_kwargs", {})
-        
-#         # Use passthrough extractor to preserve dict observations
-#         super().__init__(*args, features_extractor_class=DictPassthroughExtractor, **kwargs)
-        
-#         # Get n_robots from observation space
-#         if isinstance(self.observation_space, spaces.Dict):
-#             x_shape = self.observation_space.spaces["x"].shape
-#             self.n_robots = x_shape[0]  # First dim is R
-#         else:
-#             self.n_robots = 1
-        
-#         self.k_max = k_max
-#         self.k_out = k_max + 1  # +1 for explicit NO-OP
-        
-#         # Validate backbone and aggregation
-#         _bb_allowed = ("dummy", "sage")
-#         _agg_allowed = ("per_robot", "joint_mean", "joint_attn")
-#         if backbone not in _bb_allowed:
-#             raise ValueError(f"Invalid backbone='{backbone}'. Allowed: {_bb_allowed}")
-#         if critic_aggregation not in _agg_allowed:
-#             raise ValueError(f"Invalid critic_aggregation='{critic_aggregation}'. Allowed: {_agg_allowed}")
-        
-#         bb_lit = cast(Literal["dummy", "sage"], backbone)
-#         agg_lit = cast(Literal["per_robot", "joint_mean", "joint_attn"], critic_aggregation)
-        
-#         # Create GNN actor-critic
-#         self.gnn_ac = EgoActorCritic(
-#             in_dim=in_dim,
-#             hidden=hidden,
-#             k_max=k_max,
-#             backbone=bb_lit,
-#             critic_aggregation=agg_lit,
-#             edge_dim=int(edge_dim),
-#             use_competitor_fusion=bool(use_competitor_fusion),
-#             use_two_hop_actor=bool(use_two_hop_actor),
-#             use_two_hop_critic=bool(use_two_hop_critic),
-#             eta_index=int(eta_index),
-#             lambda_init=float(lambda_init),
-#             **gnn_kwargs,
-#         )
-        
-#         # Learnable NO-OP logit
-#         self.noop_logit = nn.Parameter(th.tensor(noop_init))
-#         self.logit_temperature = float(logit_temperature)
-        
-#         # Add GNN parameters to optimizer
-#         extra_params = list(self.gnn_ac.parameters())
-#         if not freeze_noop_logit:
-#             extra_params.append(self.noop_logit)
-#         if len(extra_params) > 0:
-#             self.optimizer.add_param_group({"params": extra_params})
-    
-#     def _build_batch_outputs(self, obs_b: Dict[str, th.Tensor]) -> Tuple[th.Tensor, th.Tensor]:
-#         """
-#         Process batch of observations through GNN actor-critic.
-        
-#         Returns:
-#             logits: [B, R, K_max] action logits
-#             values: [B, 1] value estimates
-#         """
-#         B = next(iter(obs_b.values())).shape[0]
-#         logits_list: List[th.Tensor] = []
-#         values_list: List[th.Tensor] = []
-        
-#         # Process each environment sample independently
-#         for b in range(B):
-#             obs_one = {k: v[b] for k, v in obs_b.items()}
-#             logits_b, value_b = self.gnn_ac(obs_one)  # logits: [R, K_max]
-#             logits_list.append(logits_b)
-            
-#             # Normalize value to scalar
-#             if value_b.dim() == 0:
-#                 v_b = value_b
-#             elif value_b.dim() == 1:
-#                 v_b = value_b.mean()
-#             else:
-#                 v_b = value_b.squeeze()
-#             values_list.append(v_b)
-        
-#         logits = th.stack(logits_list, dim=0)  # [B, R, K_max]
-#         logits = logits / self.logit_temperature  # Apply temperature
-#         values = th.stack(values_list, dim=0).unsqueeze(-1)  # [B, 1]
-#         return logits, values
-    
-#     def _append_noop(self, logits: th.Tensor, mask_k: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
-#         """
-#         Append NO-OP column and flatten for MultiDiscrete action space.
-        
-#         Args:
-#             logits: [B, R, K_max]
-#             mask_k: [B, R, K_max]
-        
-#         Returns:
-#             logits_flat: [B, R*(K_max+1)]
-#             mask_flat: [B, R*(K_max+1)]
-#         """
-#         B, R, _K = logits.shape
-#         noop_col = self.noop_logit.expand(B, R, 1)
-#         logits_full = th.cat([logits, noop_col], dim=-1)  # [B, R, K_max+1]
-        
-#         if mask_k.dtype != th.bool:
-#             mask_k = mask_k.bool()
-#         ones = th.ones((B, R, 1), dtype=th.bool, device=mask_k.device)
-#         mask_full = th.cat([mask_k, ones], dim=-1)  # [B, R, K_max+1]
-        
-#         # Reshape to flat format for MultiDiscrete
-#         logits_flat = logits_full.reshape(B, R * (self.k_max + 1))
-#         mask_flat = mask_full.reshape(B, R * (self.k_max + 1))
-        
-#         return logits_flat, mask_flat
-    
-#     @staticmethod
-#     def masked_logprob_entropy(
-#         logits: th.Tensor, 
-#         actions: th.Tensor, 
-#         active: th.Tensor
-#     ) -> Tuple[th.Tensor, th.Tensor]:
-#         """
-#         Compute log-probability and entropy of actions, masked by active robots.
-        
-#         Args:
-#             logits: [B, R, K] (unflattened)
-#             actions: [B, R]
-#             active: [B, R] bool
-        
-#         Returns:
-#             log_prob: [B]
-#             entropy: [B]
-#         """
-#         B, R, K = logits.shape
-        
-#         # Compute log probabilities
-#         logp = th.log_softmax(logits, dim=-1)
-#         a = actions.long().unsqueeze(-1)  # [B, R, 1]
-#         chosen_logp = logp.gather(-1, a).squeeze(-1)  # [B, R]
-        
-#         # Compute entropy
-#         p = th.softmax(logits, dim=-1)
-#         ent = -th.sum(p * logp, dim=-1)  # [B, R]
-        
-#         # Mask by active robots
-#         chosen_logp = chosen_logp * active.float()
-#         ent = ent * active.float()
-        
-#         return chosen_logp.sum(dim=1), ent.sum(dim=1)
-    
-#     def _dist_from_logits(self, logits: th.Tensor, mask: th.Tensor):
-#         """Create SB3 action distribution from logits."""
-#         # logits already flattened [B, R*K_out]
-#         return self.action_dist.proba_distribution(action_logits=logits)
-    
-#     def forward(self, obs: Any, deterministic: bool = False) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
-#         """
-#         Policy forward pass: sample actions and compute log-probabilities.
-        
-#         Returns:
-#             actions: [B, R] sampled actions
-#             values: [B, 1] value estimates
-#             log_prob: [B] log-probabilities
-#         """
-#         _ = self.extract_features(obs, features_extractor=self.features_extractor)
-#         obs_dict_b = cast(Dict[str, th.Tensor], self.features_extractor.last_obs)
-#         assert obs_dict_b is not None
-        
-#         B = next(iter(obs_dict_b.values())).shape[0]
-#         R = self.n_robots
-        
-#         logits_k, values = self._build_batch_outputs(obs_dict_b)  # [B, R, K_max], [B, 1]
-#         mask_k = obs_dict_b["cand_mask"]  # [B, R, K_max]
-#         logits_flat, mask_flat = self._append_noop(logits_k, mask_k)  # [B, R*(K_max+1)]
-        
-#         # Unflatten for masking
-#         logits_shaped = logits_flat.reshape(B, R, self.k_max + 1)
-#         mask_shaped = mask_flat.reshape(B, R, self.k_max + 1)
-#         logits_shaped = logits_shaped.masked_fill(~mask_shaped, -1e9)
-#         logits_flat = logits_shaped.reshape(B, -1)
-        
-#         dist = self._dist_from_logits(logits_flat, mask_flat)
-#         actions_flat = dist.get_actions(deterministic=deterministic)  # [B, R*(K_max+1)]
-#         actions = actions_flat.reshape(B, R)  # [B, R]
-        
-#         active = mask_k.any(dim=-1)
-#         log_prob, _ = self.masked_logprob_entropy(logits_shaped, actions, active)
-        
-#         return actions, values, log_prob
-    
-#     def evaluate_actions(self, obs: Any, actions: th.Tensor) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
-#         """Evaluate log-prob and entropy for given actions (used during training)."""
-#         _ = self.extract_features(obs, features_extractor=self.features_extractor)
-#         obs_dict_b = cast(Dict[str, th.Tensor], self.features_extractor.last_obs)
-#         assert obs_dict_b is not None
-        
-#         B = next(iter(obs_dict_b.values())).shape[0]
-#         R = self.n_robots
-        
-#         logits_k, values = self._build_batch_outputs(obs_dict_b)
-#         mask_k = obs_dict_b["cand_mask"]
-#         logits_flat, mask_flat = self._append_noop(logits_k, mask_k)
-        
-#         # Unflatten for masking
-#         logits_shaped = logits_flat.reshape(B, R, self.k_max + 1)
-#         mask_shaped = mask_flat.reshape(B, R, self.k_max + 1)
-#         logits_shaped = logits_shaped.masked_fill(~mask_shaped, -1e9)
-        
-#         # Flatten actions back to [B, R]
-#         actions = actions.reshape(B, R)
-#         active = mask_k.any(dim=-1)
-        
-#         log_prob, entropy = self.masked_logprob_entropy(logits_shaped, actions, active)
-#         return values, log_prob, entropy
-    
-#     def predict_values(self, obs: Any) -> th.Tensor:
-#         """Predict values without sampling actions."""
-#         _ = self.extract_features(obs, features_extractor=self.features_extractor)
-#         obs_dict_b = cast(Dict[str, th.Tensor], self.features_extractor.last_obs)
-#         assert obs_dict_b is not None
-#         _, values = self._build_batch_outputs(obs_dict_b)
-#         return values
-    
-#     def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
-#         """Override for model.predict() calls."""
-#         actions, _, _ = self.forward(observation, deterministic=deterministic)
-#         return actions
-
-# sb3_gnn_policy.py
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple, List, cast, Literal
@@ -310,13 +23,23 @@ class DictPassthroughExtractor(BaseFeaturesExtractor):
         super().__init__(observation_space, features_dim=1)
         self.last_obs: Optional[Dict[str, th.Tensor]] = None
 
-    def forward(self, obs: Dict[str, th.Tensor]) -> th.Tensor:
+    def forward(self, obs):
+        if isinstance(obs, dict):
+            obs = {
+                k: (v.detach() if th.is_tensor(v) else v)
+                for k, v in obs.items()
+            }
+
         self.last_obs = obs
+
         any_tensor = next(iter(obs.values()))
         B = any_tensor.shape[0]
         return th.ones((B, 1), device=any_tensor.device, dtype=any_tensor.dtype)
 
-
+def to_numpy(x):
+        if isinstance(x, th.Tensor):
+            return x.detach().cpu().numpy()
+        return x 
 class RTGNNPolicy(ActorCriticPolicy):
     """
     SB3 PPO policy for her-style ego-graph observations.
@@ -516,49 +239,101 @@ class RTGNNPolicy(ActorCriticPolicy):
 
     # ---------------- SB3 API ----------------
 
-    def forward(self, obs: Any, deterministic: bool = False) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+    # def forward(self, obs: Any, deterministic: bool = False) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+    #     obs_tensor, _ = self.obs_to_tensor(obs)
+    #     _ = self.extract_features(obs_tensor, features_extractor=self.features_extractor)
+    #     obs_b = cast(Dict[str, th.Tensor], self.features_extractor.last_obs)
+    #     assert obs_b is not None
+
+    #     logits_k, values = self._build_batch_outputs(obs_b)             # [B,R,K], [B,1]
+    #     cand_mask = obs_b["cand_mask"]                                  # [B,R,K]
+    #     logits_full, mask_full = self._append_noop_and_mask(logits_k, cand_mask)
+
+    #     # apply mask to logits (invalid actions -> -inf)
+    #     logits_full = logits_full.masked_fill(~mask_full.bool(), -1e9)
+
+    #     B = logits_full.shape[0]
+    #     logits_flat = logits_full.reshape(B, -1)                        # [B,R*(K+1)]
+    #     dist = self._dist_from_logits_flat(logits_flat)
+
+    #     actions = dist.get_actions(deterministic=deterministic)         # [B,R]  <-- IMPORTANT
+    #     active = cand_mask.bool().any(dim=-1)                           # [B,R]  (robots with >=1 candidate)
+
+    #     log_prob, _ = self.masked_logprob_entropy(logits_full, actions, active)
+    #     return actions, values, log_prob
+
+    # def evaluate_actions(self, obs: Any, actions: th.Tensor) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+    #     obs_tensor, _ = self.obs_to_tensor(obs)
+    #     _ = self.extract_features(obs_tensor, features_extractor=self.features_extractor)
+    #     obs_b = cast(Dict[str, th.Tensor], self.features_extractor.last_obs)
+    #     assert obs_b is not None
+
+    #     logits_k, values = self._build_batch_outputs(obs_b)
+    #     cand_mask = obs_b["cand_mask"]
+
+    #     logits_full, mask_full = self._append_noop_and_mask(logits_k, cand_mask)
+    #     logits_full = logits_full.masked_fill(~mask_full.bool(), -1e9)
+
+    #     B = logits_full.shape[0]
+    #     actions = actions.reshape(B, self.R)  # SB3 usually passes [B,R]; reshape is safe
+
+    #     active = cand_mask.bool().any(dim=-1)
+    #     log_prob, entropy = self.masked_logprob_entropy(logits_full, actions, active)
+    #     return values, log_prob, entropy
+    def forward(self, obs, deterministic=False):
+        obs = {
+            k: to_numpy(v)
+            for k, v in obs.items()
+        }
         obs_tensor, _ = self.obs_to_tensor(obs)
         _ = self.extract_features(obs_tensor, features_extractor=self.features_extractor)
-        obs_b = cast(Dict[str, th.Tensor], self.features_extractor.last_obs)
+        obs_b = self.features_extractor.last_obs
         assert obs_b is not None
 
-        logits_k, values = self._build_batch_outputs(obs_b)             # [B,R,K], [B,1]
-        cand_mask = obs_b["cand_mask"]                                  # [B,R,K]
+        logits_k, values = self._build_batch_outputs(obs_b)      # [B,R,K], [B,1]
+        cand_mask = obs_b["cand_mask"]                            # [B,R,K]
         logits_full, mask_full = self._append_noop_and_mask(logits_k, cand_mask)
-
-        # apply mask to logits (invalid actions -> -inf)
-        logits_full = logits_full.masked_fill(~mask_full.bool(), -1e9)
+        logits_full = logits_full.masked_fill(~mask_full, -1e9)
 
         B = logits_full.shape[0]
-        logits_flat = logits_full.reshape(B, -1)                        # [B,R*(K+1)]
+        logits_flat = logits_full.reshape(B, -1)                  # [B, R*(K+1)]
         dist = self._dist_from_logits_flat(logits_flat)
+        actions_flat = dist.get_actions(deterministic=deterministic)  # [B, R]
 
-        actions = dist.get_actions(deterministic=deterministic)         # [B,R]  <-- IMPORTANT
-        active = cand_mask.bool().any(dim=-1)                           # [B,R]  (robots with >=1 candidate)
-
+        # Reshape for per-robot log_prob computation
+        actions = actions_flat.reshape(B, self.R)
+        active  = mask_full[..., :self.K].any(dim=-1)             # [B,R] — has real candidates
         log_prob, _ = self.masked_logprob_entropy(logits_full, actions, active)
-        return actions, values, log_prob
 
-    def evaluate_actions(self, obs: Any, actions: th.Tensor) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+        return actions_flat, values, log_prob                      # SB3 expects flat actions
+
+    def evaluate_actions(self, obs, actions):
+        obs = {
+            k: to_numpy(v)
+            for k, v in obs.items()
+        }
         obs_tensor, _ = self.obs_to_tensor(obs)
         _ = self.extract_features(obs_tensor, features_extractor=self.features_extractor)
-        obs_b = cast(Dict[str, th.Tensor], self.features_extractor.last_obs)
+        obs_b = self.features_extractor.last_obs
         assert obs_b is not None
 
         logits_k, values = self._build_batch_outputs(obs_b)
         cand_mask = obs_b["cand_mask"]
-
         logits_full, mask_full = self._append_noop_and_mask(logits_k, cand_mask)
-        logits_full = logits_full.masked_fill(~mask_full.bool(), -1e9)
+        logits_full = logits_full.masked_fill(~mask_full, -1e9)
 
         B = logits_full.shape[0]
-        actions = actions.reshape(B, self.R)  # SB3 usually passes [B,R]; reshape is safe
-
-        active = cand_mask.bool().any(dim=-1)
+        actions = actions.reshape(B, self.R)
+        active  = mask_full[..., :self.K].any(dim=-1)
         log_prob, entropy = self.masked_logprob_entropy(logits_full, actions, active)
-        return values, log_prob, entropy
 
+        return values, log_prob, entropy
+    
     def predict_values(self, obs: Any) -> th.Tensor:
+        obs = {
+            k: to_numpy(v)
+            for k, v in obs.items()
+        }
         obs_tensor, _ = self.obs_to_tensor(obs)
         _ = self.extract_features(obs_tensor, features_extractor=self.features_extractor)
         obs_b = cast(Dict[str, th.Tensor], self.features_extractor.last_obs)
