@@ -146,7 +146,7 @@ def make_feature_fn(
     edge_features = expand_edge_features(edge_features, robot_commitment, route_slots_k)
     
     # Normalization scales
-    pos_scale = max(1.0, float(max_position))
+    pos_scale = pos_scale = max(1.0, float(getattr(env_state, "vicinity_m", max_position))) #max(1.0, float(max_position))
     cap_scale = max(1.0, float(max_robot_capacity))
     wait_scale = max(1.0, float(max_wait_delay_s))
     travel_scale = max(1.0, float(max_travel_delay_s))
@@ -171,46 +171,19 @@ def make_feature_fn(
             return rid in env_state.robots
         return False
 
-    def _robot_xy(rid: Optional[str]) -> Tuple[float, float]:
-        """Get 2D position (x, y) of robot."""
-        if not _valid_robot_id(rid):
+    def _robot_xy(rid):
+        robot = env_state.robots.get(str(rid) if rid is not None else "")
+        if robot is None:
             return 0.0, 0.0
-        
-        rid_s = cast(str, rid)
-        try:
-            robot = env_state.robots[rid_s]
-            x = float(getattr(robot, "x", 0.0))
-            y = float(getattr(robot, "y", 0.0))
-            return x, y
-        except Exception:
-            return 0.0, 0.0
+        return float(robot.get("x", 0.0)), float(robot.get("y", 0.0))
 
-    def _task_xy(task_id: Optional[str], is_pickup: bool = True) -> Tuple[float, float]:
-        """
-        Get 2D position of a task (pickup or dropoff location).
-        
-        Args:
-            task_id: Task identifier
-            is_pickup: If True, return pickup location; else dropoff location
-        """
-        if not task_id:
+    def _task_xy(task_id, is_pickup=True):
+        task = env_state.tasks.get(task_id) if task_id else None
+        if task is None:
             return 0.0, 0.0
-        
-        try:
-            task = env_state.tasks.get(task_id) if hasattr(env_state, "tasks") else None
-            if task is None:
-                return 0.0, 0.0
-            
-            if is_pickup:
-                x = float(getattr(task, "pickup_x", 0.0))
-                y = float(getattr(task, "pickup_y", 0.0))
-            else:
-                x = float(getattr(task, "dropoff_x", 0.0))
-                y = float(getattr(task, "dropoff_y", 0.0))
-            
-            return x, y
-        except Exception:
-            return 0.0, 0.0
+        if is_pickup:
+            return float(task.get("pickup_x", 0.0)), float(task.get("pickup_y", 0.0))
+        return float(task.get("dropoff_x", 0.0)), float(task.get("dropoff_y", 0.0))
 
     def _append_node_type(out: np.ndarray, node_type: str) -> None:
         """Append one-hot encoded node type to feature vector."""
@@ -413,20 +386,30 @@ def make_feature_fn(
                 out[0], out[1] = rx, ry
 
             # Free capacity (remaining slots)
+            # try:
+            #     robot = env_state.robots[rid_s]
+            #     capacity = max(1, getattr(robot, "capacity", max_robot_capacity))
+            #     onboard = len(getattr(robot, "assigned_tasks", []))
+            # except Exception:
+            #     capacity = max_robot_capacity
+            #     onboard = 0
+            
+            # free_capacity = max(0, capacity - onboard)
+            # if normalize_features:
+            #     out[2] = float(free_capacity) / cap_scale
+            # else:
+            #     out[2] = float(free_capacity)
             try:
-                robot = env_state.robots[rid_s]
-                capacity = max(1, getattr(robot, "capacity", max_robot_capacity))
-                onboard = len(getattr(robot, "assigned_tasks", []))
+                robot      = env_state.robots[rid_s]
+                max_cap    = int(robot.get("max_capacity", max_robot_capacity))
+                cur_onboard = int(robot.get("current_capacity", 0))   # physically onboard
+                free_cap   = max(0, max_cap - cur_onboard)
             except Exception:
-                capacity = max_robot_capacity
-                onboard = 0
-            
-            free_capacity = max(0, capacity - onboard)
+                free_cap = max_robot_capacity
             if normalize_features:
-                out[2] = float(free_capacity) / cap_scale
+                out[2] = float(free_cap) / cap_scale
             else:
-                out[2] = float(free_capacity)
-            
+                out[2] = float(free_cap)
             # Append optional features
             _append_node_type(out, "robot")
             _append_ego_robot(out, is_ego)
@@ -447,10 +430,10 @@ def make_feature_fn(
                 return out  # Return zeros if task not found
 
             # Timing features
-            release_time = float(getattr(t, "release_time", 0.0))
-            waiting_time = float(max(0.0, current_time - release_time))
-            est_travel_time = float(getattr(t, "est_travel_time", 0.0))
-            
+            release_time    = float(t.get("release_time", 0.0))
+            est_travel_time = float(t.get("est_travel_time", 0.0))
+            waiting_time    = float(max(0.0, current_time - release_time))
+                        
             if normalize_features:
                 out[0] = release_time / time_scale
                 out[1] = waiting_time / wait_scale
@@ -481,17 +464,18 @@ def make_feature_fn(
                     out[6] = float(py - ry)
                     out[7], out[8] = dx, dy
                 
-                out[9] = 1.0 if bool(getattr(t, "is_obsolete", False)) else 0.0
-                out[10] = 1.0 if bool(getattr(t, "is_assigned", False)) else 0.0
+                # out[9] = 1.0 if bool(getattr(t, "is_obsolete", False)) else 0.0
+                # out[10] = 1.0 if bool(getattr(t, "is_assigned", False)) else 0.0
+                out[9] = 1.0 if bool(t.get("is_obsolete", False)) else 0.0
+                out[10] = 1.0 if bool(t.get("is_assigned",  False)) else 0.0
             else:
                 if normalize_features:
                     out[5], out[6] = dx / pos_scale, dy / pos_scale
                 else:
                     out[5], out[6] = dx, dy
-                
-                out[7] = 1.0 if bool(getattr(t, "is_obsolete", False)) else 0.0
-                out[8] = 1.0 if bool(getattr(t, "is_assigned", False)) else 0.0
             
+                out[7] = 1.0 if bool(t.get("is_obsolete", False)) else 0.0
+                out[8] = 1.0 if bool(t.get("is_assigned",  False)) else 0.0
             # Append optional features
             _append_node_type(out, "task")
             _append_ego_robot(out, False)
