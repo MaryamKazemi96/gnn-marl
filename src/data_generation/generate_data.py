@@ -40,7 +40,7 @@ class DataGenerator:
                     break
         return np.array(agents)
 
-    def generate_tasks(self, n_batches, n_points, release_time_interval=30):
+    def generate_tasks(self, n_batches, n_points, release_time_interval=15):
         """
         Generate tasks for multiple batches with release times.
         
@@ -116,11 +116,11 @@ if __name__ == "__main__":
     )
     parser.add_argument("--n-batches", type=int, default=10,
                         help="Number of batches to generate (default: 10)")
-    parser.add_argument("--n-tasks", type=int, default=4,
+    parser.add_argument("--n-tasks", type=int, default=8,
                         help="Number of tasks per batch (default: 4)")
     parser.add_argument("--n-robots", type=int, default=6,
                         help="Number of robots/agents (default: 6)")
-    parser.add_argument("--release-interval", type=int, default=50,
+    parser.add_argument("--release-interval", type=int, default=15,
                         help="Time interval between batch releases (default: 30)")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Output directory for data files (default: data/)")

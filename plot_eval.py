@@ -302,8 +302,8 @@ def plot_eval_stats_summary(
         methods["PPO Stoch"] = {
             "Reward": float(st.get("reward_mean", 0.0)),
             "Std": float(st.get("reward_std", 0.0)),
-            "Completed": float(st.get("completed_mean", 0.0)),
-            "Obsolete": float(st.get("obsolete_mean", 0.0)),
+            "Completed": float(st.get("completed", 0.0)),
+            "Obsolete": float(st.get("obsolete", 0.0)),
         }
     
     for name, b_data in baselines.items():

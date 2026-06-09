@@ -96,6 +96,6 @@ decision_interval: 8  # Steps between policy decisions
 ppo_steps: 1024
 batch_size: 64
 learning_rate: 0.0003
-total_timesteps: 2000
+total_timesteps: 50000
 
 max_steps: 2500

@@ -101,7 +101,7 @@ class MultiAgentTaskEnv(gym.Env):
         two_hop_directed: bool = False,
         vicinity_m: float = 40.0,
         movement_speed: float = 1.0,
-        decision_interval: int = 10,
+        decision_interval: int = 7,
         radius: int = 20,
         feature_size: int = 9,
         use_true_id: bool = False,
