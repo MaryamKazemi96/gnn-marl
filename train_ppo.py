@@ -268,7 +268,7 @@ def main():
             edge_features=config.get("edge_features"),
             two_hop=two_hop,
             two_hop_directed=config.get("two_hop_directed", False),
-            vicinity_m=config.get("vicinity_m", 40.0),
+            vicinity_m=config.get("vicinity_m", 20.0),
             max_steps=config.get("max_steps", 1000),
             max_robot_capacity=config.get("max_robot_capacity", 2),
             max_wait_delay_s=config.get("max_wait_delay_s", 600.0),

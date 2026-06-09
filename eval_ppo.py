@@ -91,6 +91,9 @@ def make_env(agents, tasks, config, seed):
             two_hop=config.get("two_hop", False),
             vicinity_m=config.get("vicinity_m", 20.0),
             max_steps=config.get("max_steps", 1000),
+            max_robot_capacity=config.get("max_robot_capacity", 2),
+            max_wait_delay_s=config.get("max_wait_delay_s", 600.0),
+            max_travel_delay_s=config.get("max_travel_delay_s", 3600.0),
         )
         env.reset(seed=seed)
         return env
@@ -156,8 +159,8 @@ def run_eval(model, env, episodes, deterministic):
         "completed": completed,
         "obsolete": obsolete,
         "stats": {
-            "mean": float(r.mean()),
-            "std": float(r.std()),
+            "reward_mean": float(r.mean()),
+            "reward_std": float(r.std()),
             "min": float(r.min()),
             "max": float(r.max()),
             "completed": float(np.mean(completed)),
@@ -258,8 +261,8 @@ def main():
     print("RESULTS")
     print("============================")
 
-    print(f"Deterministic: {det['stats']['mean']:.2f} ± {det['stats']['std']:.2f}")
-    print(f"Stochastic:    {sto['stats']['mean']:.2f} ± {sto['stats']['std']:.2f}")
+    print(f"Deterministic: {det['stats']['reward_mean']:.2f} ± {det['stats']['reward_std']:.2f}")
+    print(f"Stochastic:    {sto['stats']['reward_mean']:.2f} ± {sto['stats']['reward_std']:.2f}")
     print(f"\nSaved → {out}\n")
 
 

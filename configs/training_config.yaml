@@ -93,9 +93,9 @@ two_hop: true
 decision_interval: 8  # Steps between policy decisions
 
 # PPO parameters
-ppo_steps: 2048
+ppo_steps: 1024
 batch_size: 64
 learning_rate: 0.0003
-total_timesteps: 20000
+total_timesteps: 2000
 
 max_steps: 2500

@@ -1,531 +1,4 @@
 """
-Plot-only script for evaluation results.
-
-Reads:
-  - eval_results_deterministic.json (from eval_ppo.py)
-  - eval_results_stochastic.json (from eval_ppo.py)
-  - baseline_results_all.json (from eval_baseline.py)
-  - baseline_{policy}_seed_{seed}.json (from eval_baseline.py)
-
-Generates plots in:
-  - eval_results/ (default output)
-  - or custom --output-dir
-
-Usage:
-  python plot_evaluation.py
-  python plot_evaluation.py --output-dir custom_plots
-"""
-import argparse
-import json
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-
-import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
-
-# ============================================================================
-# Helpers
-# ============================================================================
-
-def _load_json(p: Path) -> Any:
-    """Load JSON file."""
-    with p.open("r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _save_fig(fig, out_path: Path) -> None:
-    """Save figure to file."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=160, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  ✓ Saved: {out_path.name}")
-
-
-def _moving_average(data: np.ndarray, window: int) -> np.ndarray:
-    """Compute moving average."""
-    data = np.asarray(data, dtype=float)
-    if data.size == 0 or window <= 1 or data.size < window:
-        return data
-    cumsum = np.cumsum(np.insert(data, 0, 0.0))
-    ma = (cumsum[window:] - cumsum[:-window]) / window
-    pad_len = data.size - ma.size
-    return np.concatenate([data[:pad_len], ma])
-
-
-# ============================================================================
-# Load Baseline Results
-# ============================================================================
-
-def load_baselines_all(baseline_file: Path) -> Dict[str, Dict]:
-    """Load baseline_results_all.json → {random: {...}, greedy: {...}, unique: {...}}"""
-    if not baseline_file.exists():
-        return {}
-    
-    try:
-        data = _load_json(baseline_file)
-    except Exception as e:
-        print(f"  ⚠️  Could not load baseline results: {e}")
-        return {}
-    
-    out: Dict[str, Dict] = {}
-    for pol in ["random", "greedy", "unique"]:
-        if pol in data:
-            pol_data = data[pol]
-            out[pol.upper()] = {
-                "rewards": pol_data.get("rewards", []),
-                "completed": pol_data.get("completed", []),
-                "obsolete": pol_data.get("obsolete", []),
-            }
-    
-    return out
-
-
-def load_baseline_stats_for_seed(baseline_dir: Path, seed: int) -> Optional[Dict[str, Dict[str, float]]]:
-    """Load per-seed baseline JSON files → {random: {mean, std}, ...}"""
-    out: Dict[str, Dict[str, float]] = {}
-    
-    for pol in ["random", "greedy", "unique"]:
-        p = baseline_dir / f"baseline_{pol}_seed_{seed}.json"
-        if not p.exists():
-            continue
-        
-        try:
-            data = _load_json(p)
-        except Exception as exc:
-            print(f"  ⚠️  Could not read {p}: {exc}")
-            continue
-        
-        st = (data or {}).get("stats", {})
-        if isinstance(st, dict):
-            out[pol] = {
-                "mean": float(st.get("reward_mean", 0.0)),
-                "std": float(st.get("reward_std", 0.0)),
-            }
-    
-    return out if out else None
-
-
-# ============================================================================
-# Evaluation Plots
-# ============================================================================
-
-def plot_eval_rewards_per_episode(
-    det_data: Optional[Dict],
-    stoch_data: Optional[Dict],
-    baselines: Dict[str, Dict],
-    out_png: Path,
-    ma_window: int = 5,
-) -> None:
-    """Plot per-episode rewards with moving average."""
-    fig, ax = plt.subplots(figsize=(14, 6), facecolor="white")
-    ax.set_facecolor("#fafafa")
-
-    # PPO results
-    for label, color, data in [
-        ("PPO Deterministic", "#2980b9", det_data),
-        ("PPO Stochastic", "#27ae60", stoch_data),
-    ]:
-        if not data:
-            continue
-        
-        rewards = np.asarray(data.get("rewards", []), dtype=float)
-        if rewards.size == 0:
-            continue
-        
-        x = np.arange(1, rewards.size + 1)
-        ax.plot(x, rewards, alpha=0.15, color=color, linewidth=0.8)
-        ax.plot(x, _moving_average(rewards, ma_window), lw=2.6, color=color,
-                label=f"{label} MA({ma_window}) – mean {rewards.mean():.2f}")
-        ax.axhline(rewards.mean(), color=color, lw=1.4, ls="--", alpha=0.55)
-
-    # Baseline results
-    baseline_order = ["RANDOM", "GREEDY", "UNIQUE"]
-    baseline_colors = {"RANDOM": "#e74c3c", "GREEDY": "#f39c12", "UNIQUE": "#8c564b"}
-    
-    for name in baseline_order:
-        if name not in baselines:
-            continue
-        
-        rewards = np.asarray(baselines[name].get("rewards", []), dtype=float)
-        if rewards.size == 0:
-            continue
-        
-        x = np.arange(1, rewards.size + 1)
-        c = baseline_colors.get(name, "#7f8c8d")
-        ax.plot(x, rewards, alpha=0.10, color=c, linewidth=0.8)
-        ax.plot(x, _moving_average(rewards, ma_window), lw=2.2, color=c,
-                label=f"{name} MA({ma_window}) – mean {rewards.mean():.2f}")
-        ax.axhline(rewards.mean(), color=c, lw=1.2, ls="--", alpha=0.45)
-
-    ax.set_xlabel("Episode", fontsize=11, fontweight="bold")
-    ax.set_ylabel("Episode Reward", fontsize=11, fontweight="bold")
-    ax.set_title("Evaluation: Per-Episode Rewards (PPO Det/Stoch + Baselines)", 
-                fontsize=14, fontweight="bold")
-    ax.legend(fontsize=9, loc="best")
-    ax.grid(alpha=0.25)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    
-    _save_fig(fig, out_png)
-
-
-def plot_eval_rewards_boxplot(
-    det_data: Optional[Dict],
-    stoch_data: Optional[Dict],
-    baselines: Dict[str, Dict],
-    out_png: Path,
-) -> None:
-    """Plot reward distribution as boxplot."""
-    ordered: Dict[str, np.ndarray] = {}
-    
-    if det_data:
-        r = np.asarray(det_data.get("rewards", []), dtype=float)
-        if r.size:
-            ordered["PPO Det"] = r
-    
-    if stoch_data:
-        r = np.asarray(stoch_data.get("rewards", []), dtype=float)
-        if r.size:
-            ordered["PPO Stoch"] = r
-    
-    for name, d in baselines.items():
-        r = np.asarray(d.get("rewards", []), dtype=float)
-        if r.size:
-            ordered[name] = r
-
-    if not ordered:
-        print("  ⚠️  No reward data for boxplot")
-        return
-
-    labels = list(ordered.keys())
-    series = list(ordered.values())
-
-    fig, ax = plt.subplots(figsize=(max(8, len(labels) * 1.8), 5), facecolor="white")
-    ax.set_facecolor("#fafafa")
-    
-    bp = ax.boxplot(series, labels=labels, showmeans=True, patch_artist=True,
-                    medianprops=dict(color="red", linewidth=2))
-    
-    colors_list = ["#2980b9", "#27ae60", "#e74c3c", "#f39c12", "#8c564b"]
-    for patch, color in zip(bp["boxes"], colors_list[: len(labels)]):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.6)
-
-    ax.set_ylabel("Episode Reward", fontsize=11, fontweight="bold")
-    ax.set_title("Evaluation: Reward Distribution (Det vs Stoch vs Baselines)", 
-                fontsize=13, fontweight="bold")
-    ax.grid(alpha=0.25, axis="y")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    
-    _save_fig(fig, out_png)
-
-
-def plot_eval_completion_obsolete(
-    det_data: Optional[Dict],
-    stoch_data: Optional[Dict],
-    baselines: Dict[str, Dict],
-    out_png: Path,
-) -> None:
-    """Plot completion and obsolescence rates."""
-    methods: Dict[str, Dict] = {}
-    
-    if det_data:
-        methods["PPO Det"] = det_data
-    if stoch_data:
-        methods["PPO Stoch"] = stoch_data
-    
-    methods.update(baselines)
-
-    if not methods:
-        print("  ⚠️  No completion data for plot")
-        return
-
-    labels: List[str] = []
-    comp_means: List[float] = []
-    obs_means: List[float] = []
-
-    for name, d in methods.items():
-        c = np.asarray(d.get("completed", []), dtype=float)
-        o = np.asarray(d.get("obsolete", []), dtype=float)
-        labels.append(name)
-        comp_means.append(float(c.mean()) if c.size else 0.0)
-        obs_means.append(float(o.mean()) if o.size else 0.0)
-
-    x = np.arange(len(labels))
-    w = 0.35
-    
-    fig, ax = plt.subplots(figsize=(max(9, len(labels) * 2), 5), facecolor="white")
-    ax.set_facecolor("#fafafa")
-    
-    ax.bar(x - w / 2, comp_means, width=w, label="Completed (mean)", color="#27ae60", alpha=0.8)
-    ax.bar(x + w / 2, obs_means, width=w, label="Obsolete (mean)", color="#c0392b", alpha=0.8)
-    
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=10)
-    ax.set_ylabel("Count per Episode", fontsize=11, fontweight="bold")
-    ax.set_title("Evaluation: Task Completion & Obsolescence (Det vs Stoch vs Baselines)", 
-                fontsize=13, fontweight="bold")
-    ax.grid(alpha=0.25, axis="y")
-    ax.legend(fontsize=10)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    
-    _save_fig(fig, out_png)
-
-
-def plot_eval_stats_summary(
-    det_data: Optional[Dict],
-    stoch_data: Optional[Dict],
-    baselines: Dict[str, Dict],
-    out_png: Path,
-) -> None:
-    """Plot summary statistics as a table."""
-    methods: Dict[str, Dict[str, float]] = {}
-    
-    if det_data:
-        st = det_data.get("stats", {})
-        methods["PPO Det"] = {
-            "Reward Mean": float(st.get("reward_mean", 0.0)),
-            "Reward Std": float(st.get("reward_std", 0.0)),
-            "Completed": float(st.get("completed_mean", 0.0)),
-            "Obsolete": float(st.get("obsolete_mean", 0.0)),
-        }
-    
-    if stoch_data:
-        st = stoch_data.get("stats", {})
-        methods["PPO Stoch"] = {
-            "Reward Mean": float(st.get("reward_mean", 0.0)),
-            "Reward Std": float(st.get("reward_std", 0.0)),
-            "Completed": float(st.get("completed_mean", 0.0)),
-            "Obsolete": float(st.get("obsolete_mean", 0.0)),
-        }
-    
-    for name, b_data in baselines.items():
-        if isinstance(b_data, dict):
-            rewards = np.asarray(b_data.get("rewards", []), dtype=float)
-            completed = np.asarray(b_data.get("completed", []), dtype=float)
-            obsolete = np.asarray(b_data.get("obsolete", []), dtype=float)
-            
-            methods[name] = {
-                "Reward Mean": float(rewards.mean()) if rewards.size else 0.0,
-                "Reward Std": float(rewards.std()) if rewards.size else 0.0,
-                "Completed": float(completed.mean()) if completed.size else 0.0,
-                "Obsolete": float(obsolete.mean()) if obsolete.size else 0.0,
-            }
-
-    if not methods:
-        print("  ⚠️  No stats for summary table")
-        return
-
-    # Create table
-    fig, ax = plt.subplots(figsize=(10, 6), facecolor="white")
-    ax.axis("tight")
-    ax.axis("off")
-
-    # Prepare table data
-    cols = ["Method", "Reward Mean", "Reward Std", "Completed", "Obsolete"]
-    rows = []
-    
-    for method, stats in methods.items():
-        rows.append([
-            method,
-            f"{stats['Reward Mean']:.2f}",
-            f"{stats['Reward Std']:.2f}",
-            f"{stats['Completed']:.2f}",
-            f"{stats['Obsolete']:.2f}",
-        ])
-
-    table = ax.table(cellText=rows, colLabels=cols, cellLoc="center", loc="center",
-                    colWidths=[0.2, 0.2, 0.2, 0.2, 0.2])
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1, 2)
-
-    # Style header
-    for i in range(len(cols)):
-        table[(0, i)].set_facecolor("#3498db")
-        table[(0, i)].set_text_props(weight="bold", color="white")
-
-    # Alternate row colors
-    for i in range(1, len(rows) + 1):
-        for j in range(len(cols)):
-            if i % 2 == 0:
-                table[(i, j)].set_facecolor("#ecf0f1")
-            else:
-                table[(i, j)].set_facecolor("white")
-
-    ax.set_title("Evaluation: Summary Statistics", fontsize=14, fontweight="bold", pad=20)
-    
-    _save_fig(fig, out_png)
-
-
-def plot_reward_comparison(
-    det_data: Optional[Dict],
-    stoch_data: Optional[Dict],
-    baselines: Dict[str, Dict],
-    out_png: Path,
-) -> None:
-    """Plot reward means with error bars."""
-    methods: Dict[str, Tuple[float, float]] = {}  # mean, std
-    
-    if det_data:
-        st = det_data.get("stats", {})
-        methods["PPO Det"] = (
-            float(st.get("reward_mean", 0.0)),
-            float(st.get("reward_std", 0.0)),
-        )
-    
-    if stoch_data:
-        st = stoch_data.get("stats", {})
-        methods["PPO Stoch"] = (
-            float(st.get("reward_mean", 0.0)),
-            float(st.get("reward_std", 0.0)),
-        )
-    
-    for name, b_data in baselines.items():
-        rewards = np.asarray(b_data.get("rewards", []), dtype=float)
-        methods[name] = (
-            float(rewards.mean()) if rewards.size else 0.0,
-            float(rewards.std()) if rewards.size else 0.0,
-        )
-
-    if not methods:
-        print("  ⚠️  No reward data for comparison")
-        return
-
-    labels = list(methods.keys())
-    means = [m[0] for m in methods.values()]
-    stds = [m[1] for m in methods.values()]
-    
-    colors_map = {
-        "PPO Det": "#2980b9",
-        "PPO Stoch": "#27ae60",
-        "RANDOM": "#e74c3c",
-        "GREEDY": "#f39c12",
-        "UNIQUE": "#8c564b",
-    }
-    colors = [colors_map.get(l, "#7f8c8d") for l in labels]
-
-    fig, ax = plt.subplots(figsize=(max(9, len(labels) * 2), 6), facecolor="white")
-    ax.set_facecolor("#fafafa")
-    
-    x = np.arange(len(labels))
-    ax.bar(x, means, yerr=stds, capsize=8, color=colors, alpha=0.8, edgecolor="black", linewidth=1.5)
-    
-    # Add value labels
-    for i, (mean, std) in enumerate(zip(means, stds)):
-        ax.text(i, mean + std + 1, f"{mean:.2f}", ha="center", va="bottom", fontweight="bold")
-    
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=11, fontweight="bold")
-    ax.set_ylabel("Reward Mean ± Std", fontsize=11, fontweight="bold")
-    ax.set_title("Evaluation: Reward Comparison (All Methods)", fontsize=14, fontweight="bold")
-    ax.grid(alpha=0.25, axis="y")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    
-    _save_fig(fig, out_png)
-
-
-# ============================================================================
-# Main
-# ============================================================================
-
-def main2() -> None:
-    ap = argparse.ArgumentParser(
-        description="Generate evaluation plots from JSON results",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    ap.add_argument("--eval-dir", type=str, default="eval_results",
-                   help="Directory containing eval_results_*.json")
-    ap.add_argument("--baseline-dir", type=str, default="baseline_results",
-                   help="Directory containing baseline_results_*.json")
-    ap.add_argument("--output-dir", type=str, default="plots",
-                   help="Output directory for plots")
-    ap.add_argument("--ma-window", type=int, default=2,
-                   help="Moving average window size")
-    ap.add_argument("--seed", type=int, default=None,
-                   help="Seed for per-seed baselines (optional)")
-    
-    args = ap.parse_args()
-
-    eval_dir = Path(args.eval_dir)
-    baseline_dir = Path(args.baseline_dir)
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    print("="*80)
-    print("Generating Evaluation Plots")
-    print("="*80 + "\n")
-
-    # Load evaluation results
-    print("Loading evaluation results...")
-    det_file = eval_dir / "deterministic.json"
-    stoch_file = eval_dir / "stochastic.json"
-
-    det_data = None
-    stoch_data = None
-
-    if det_file.exists():
-        det_data = _load_json(det_file)
-        print(f"  ✓ Loaded deterministic results ({len(det_data.get('rewards', []))} episodes)")
-    else:
-        print(f"  ⚠️  Deterministic results not found: {det_file}")
-
-    if stoch_file.exists():
-        stoch_data = _load_json(stoch_file)
-        print(f"  ✓ Loaded stochastic results ({len(stoch_data.get('rewards', []))} episodes)")
-    else:
-        print(f"  ⚠️  Stochastic results not found: {stoch_file}")
-
-    # Load baseline results
-    print("\n📂 Loading baseline results...")
-    baseline_all_file = baseline_dir / "baseline_results_all.json"
-    baselines = load_baselines_all(baseline_all_file)
-    
-    if baselines:
-        print(f"  ✓ Loaded aggregate baseline results ({len(baselines)} policies)")
-    else:
-        print(f"  ⚠️  No baseline results found: {baseline_all_file}")
-
-    # Load per-seed baseline stats if seed specified
-    baselines_stats = None
-    if args.seed is not None:
-        baselines_stats = load_baseline_stats_for_seed(baseline_dir, args.seed)
-        if baselines_stats:
-            print(f"  ✓ Loaded per-seed baseline stats for seed {args.seed}")
-
-    # Generate plots
-    print(f"\n📊 Generating plots → {output_dir}\n")
-
-    plot_eval_rewards_per_episode(det_data, stoch_data, baselines, 
-                                 output_dir / "eval_rewards_per_episode.png", 
-                                 ma_window=args.ma_window)
-    
-    plot_eval_rewards_boxplot(det_data, stoch_data, baselines,
-                             output_dir / "eval_rewards_boxplot.png")
-    
-    plot_eval_completion_obsolete(det_data, stoch_data, baselines,
-                                 output_dir / "eval_completion_obsolete.png")
-    
-    plot_eval_stats_summary(det_data, stoch_data, baselines,
-                           output_dir / "eval_stats_summary.png")
-    
-    plot_reward_comparison(det_data, stoch_data, baselines,
-                          output_dir / "eval_reward_comparison.png")
-
-    print(f"\n✓ All plots saved to {output_dir}\n")
-
-
-# if __name__ == "__main__":
-#     main()
-
-
-"""
 Comprehensive evaluation and training plots.
 
 Reads:
@@ -571,7 +44,7 @@ def _save_fig(fig, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=160, bbox_inches="tight")
     plt.close(fig)
-    print(f"  ✓ {out_path.name}")
+    print(f" {out_path.name}")
 
 
 def _moving_average(data: np.ndarray, window: int) -> np.ndarray:
@@ -598,6 +71,7 @@ def _load_monitor_csv(csv_file: Path) -> Dict[str, List[float]]:
     
     try:
         with csv_file.open("r") as f:
+            next(f) 
             reader = csv.DictReader(f)
             for row in reader:
                 try:
@@ -607,7 +81,7 @@ def _load_monitor_csv(csv_file: Path) -> Dict[str, List[float]]:
                 except (ValueError, KeyError):
                     continue
     except Exception as e:
-        print(f"  ⚠️  Error reading monitor.csv: {e}")
+        print(f" Error reading monitor.csv: {e}")
     
     return data
 
@@ -624,7 +98,7 @@ def load_baselines_all(baseline_file: Path) -> Dict[str, Dict]:
     try:
         data = _load_json(baseline_file)
     except Exception as e:
-        print(f"  ⚠️  Could not load baseline results: {e}")
+        print(f" Could not load baseline results: {e}")
         return {}
     
     out: Dict[str, Dict] = {}
@@ -819,8 +293,8 @@ def plot_eval_stats_summary(
         methods["PPO Det"] = {
             "Reward": float(st.get("reward_mean", 0.0)),
             "Std": float(st.get("reward_std", 0.0)),
-            "Completed": float(st.get("completed_mean", 0.0)),
-            "Obsolete": float(st.get("obsolete_mean", 0.0)),
+            "Completed": float(st.get("completed", 0.0)),
+            "Obsolete": float(st.get("obsolete", 0.0)),
         }
     
     if stoch_data:
@@ -946,7 +420,6 @@ def plot_training_episode_length(
 
     lengths = np.asarray(monitor_data["length"], dtype=float)
     timesteps = np.asarray(monitor_data["timestep"], dtype=float)
-    
     ax.plot(timesteps, lengths, "o", markersize=3, alpha=0.25,
            color="#9b59b6", label="Raw")
     ax.plot(timesteps, _moving_average(lengths, ma_window), lw=2.8,
@@ -1240,9 +713,9 @@ def main() -> None:
     stoch_data = _load_json(stoch_file) if stoch_file.exists() else None
 
     if det_data:
-        print(f"  ✓ Deterministic ({len(det_data.get('rewards', []))} episodes)")
+        print(f" Deterministic ({len(det_data.get('rewards', []))} episodes)")
     if stoch_data:
-        print(f"  ✓ Stochastic ({len(stoch_data.get('rewards', []))} episodes)")
+        print(f" Stochastic ({len(stoch_data.get('rewards', []))} episodes)")
 
     # Load baselines
     print("Loading baseline results...")
@@ -1250,16 +723,16 @@ def main() -> None:
     baselines = load_baselines_all(baseline_file)
     
     if baselines:
-        print(f"  ✓ Loaded {len(baselines)} baseline policies")
+        print(f"Loaded {len(baselines)} baseline policies")
 
     # Load training data
     print(" Loading training data...")
-    monitor_data = _load_monitor_csv(Path(args.monitor))
+    monitor_data = _load_monitor_csv(Path(run_dir) / args.monitor)
     if monitor_data["reward"]:
         print(f" Monitor CSV ({len(monitor_data['reward'])} episodes)")
 
     # Generate plots
-    print(f" Generating plots → {output_dir}\n")
+    print(f" Generating plots {output_dir}\n")
 
     # Evaluation plots
     print("Evaluation Plots:")
