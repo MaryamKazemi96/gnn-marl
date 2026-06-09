@@ -164,6 +164,9 @@ class MultiAgentTaskEnvold(gym.Env):
         self.episode_obsolete_count = 0
         self.episode_pickup_count = 0
         self.episode_dropoff_count = 0
+        self._prev_completed_count = 0
+        self._prev_obsolete_count  = 0
+
 
         # Get map bounds
         if self.init_mode == "new":
@@ -278,7 +281,10 @@ class MultiAgentTaskEnvold(gym.Env):
         self.episode_obsolete_count = 0
         self.episode_pickup_count = 0
         self.episode_dropoff_count = 0
-
+        self._prev_completed_count = 0
+        self._prev_obsolete_count  = 0
+        self._prev_pickup_count    = 0
+        self._prev_dropoff_count   = 0
         if self.init_mode == "new":
             self._reset_new_mode()
         else:
@@ -386,12 +392,12 @@ class MultiAgentTaskEnvold(gym.Env):
         self.current_step += 1
         
         # 5. Compute rewards
-        # reward = self._compute_rewards(action_info)
-        reward = self._compute_rewards(
-        action_info,
-        completed_delta=self.episode_completed_count - prev_completed,
-        obsolete_delta=self.episode_obsolete_count - prev_obsolete,
-    )
+        reward = self._compute_rewards(action_info)
+    #     reward = self._compute_rewards(
+    #     action_info,
+    #     completed_delta=self.episode_completed_count - prev_completed,
+    #     obsolete_delta=self.episode_obsolete_count - prev_obsolete,
+    # )
         print("reawrd in step", reward)
         # 6. Check termination
         terminated = self._check_episode_done()
@@ -420,7 +426,7 @@ class MultiAgentTaskEnvold(gym.Env):
     # TASK ASSIGNMENT & ACTION PROCESSING
     # ========================================================================
 
-    def _process_actions(self, actions: np.ndarray) -> Dict[int, Dict]:
+    def _process_actionsold(self, actions: np.ndarray) -> Dict[int, Dict]:
         """
         Process policy actions and assign tasks to robots.
         
@@ -465,7 +471,41 @@ class MultiAgentTaskEnvold(gym.Env):
                     robot["current_capacity"] += 1 # Increment capacity immediately upon assignment rather t5han after pickup
         
         return action_info
+    
+    def _process_actions(self, actions):
+        robot_ids = sorted(self.robots.keys())
+        requests = []
+        for r_idx, action in enumerate(actions):
+            if r_idx >= len(robot_ids):
+                break
+            robot_id = robot_ids[r_idx]
+            if int(action) == self._noop_index:
+                continue
+            cands = self._get_candidate_tasks(robot_id)
+            if int(action) < len(cands):
+                task_id = cands[int(action)]
+                robot = self.robots[robot_id]
+                dist = np.sqrt((robot["x"] - self.tasks[task_id]["pickup_x"])**2 +
+                            (robot["y"] - self.tasks[task_id]["pickup_y"])**2)
+                requests.append((dist, robot_id, task_id))
 
+        requests.sort()   # closest first wins conflict
+        assigned_tasks = set()
+        action_info = {rid: {"action": -1, "assigned_task": None}
+                    for rid in robot_ids[:len(actions)]}
+
+        for dist, robot_id, task_id in requests:
+            if task_id in assigned_tasks:
+                continue  # conflict: skip
+            robot = self.robots[robot_id]
+            if robot["current_capacity"] < self.max_robot_capacity:
+                robot["assigned_tasks"].append(task_id)
+                self.tasks[task_id]["is_assigned"] = True
+                self.tasks[task_id]["assigned_robot"] = robot_id
+                assigned_tasks.add(task_id)
+                action_info[robot_id]["assigned_task"] = task_id
+
+        return action_info
     def _get_candidate_tasks(self, robot_id) -> List[int]:
         """Get list of available candidate tasks for a robot."""
         
@@ -691,7 +731,7 @@ class MultiAgentTaskEnvold(gym.Env):
     # REWARD COMPUTATION
     # ========================================================================
 
-    def _compute_rewards(self, action_info, completed_delta=0, obsolete_delta=0):
+    def _compute_rewardsold(self, action_info, completed_delta=0, obsolete_delta=0):
         total_reward = 0.0
         
         for r_idx, robot_id in enumerate(sorted(self.robots.keys())[:self.num_robots]):
@@ -711,8 +751,42 @@ class MultiAgentTaskEnvold(gym.Env):
         total_reward -= 2.0 * obsolete_delta
         
         return float(total_reward)
+    
+    def _compute_rewards(self, action_info):
+        new_pickups  = self.episode_pickup_count  - self._prev_pickup_count
+        new_dropoffs = self.episode_dropoff_count - self._prev_dropoff_count
+        new_complete = self.episode_completed_count - self._prev_completed_count
+        new_obsolete = self.episode_obsolete_count  - self._prev_obsolete_count
 
-    def _check_episode_done(self) -> bool:
+        self._prev_pickup_count    = self.episode_pickup_count
+        self._prev_dropoff_count   = self.episode_dropoff_count
+        self._prev_completed_count = self.episode_completed_count
+        self._prev_obsolete_count  = self.episode_obsolete_count
+
+        W_COMP     = 1.0
+        W_WAIT     = 1.5
+        W_DEADLINE = 5.0
+        WAIT_CAP   = float(self.max_wait_delay_s)   # from __init__
+        DEAD_CAP   = float(self.max_wait_delay_s)
+
+        # Completion reward
+        reward = float(new_complete) * W_COMP
+
+        # Wait penalty: for each pickup this step, penalize wait time
+        for robot in self.robots.values():
+            if robot.get("just_picked_up_task"):  # see fix in _move_robot
+                task_id = robot["just_picked_up_task"]
+                t = self.tasks.get(task_id)
+                if t is not None:
+                    wait_s = max(0.0, self.current_time - t["release_time"])
+                    reward += -(min(wait_s, WAIT_CAP) / WAIT_CAP) * W_WAIT
+                robot["just_picked_up_task"] = None
+
+        # Obsolete penalty
+        reward -= float(new_obsolete) * (W_DEADLINE * 0.5)
+
+        return reward
+    def _check_episode_doneold(self) -> bool:
         """
         Episode terminates when:
         - All available tasks are completed
@@ -736,7 +810,17 @@ class MultiAgentTaskEnvold(gym.Env):
             return True
         
         return False
-
+    def _check_episode_done(self):
+        any_pending = any(
+            not t.get("is_completed") and not t.get("is_obsolete")
+            for t in self.tasks.values()
+        )
+        robots_idle = all(
+            len(r["assigned_tasks"]) == 0 and r["current_task"] is None
+            for r in self.robots.values()
+        )
+        # Only done when nothing is left to do AND no unreleased future tasks
+        return (not any_pending) and robots_idle
     # ========================================================================
     # UTILITIES
     # ========================================================================
@@ -788,14 +872,14 @@ class MultiAgentTaskEnv(gym.Env):
         E_max: int = 50,
         K_max: int = 5,
         max_robot_capacity: int = 2,
-        max_wait_delay_s: float = 600.0,
+        max_wait_delay_s: float = 60.0,
         max_travel_delay_s: float = 3600.0,
         max_steps: int = 1000,
         two_hop: bool = False,
         two_hop_directed: bool = False,
         vicinity_m: float = 40.0,
         movement_speed: float = 1.0,
-        decision_interval: int = 1,
+        decision_interval: int = 10,
         radius: int = 20,
         feature_size: int = 9,
         use_true_id: bool = False,
@@ -835,6 +919,7 @@ class MultiAgentTaskEnv(gym.Env):
         self.max_steps = max_steps
         self.movement_speed = movement_speed
         self.decision_interval = decision_interval
+        self.max_wait_delay_s = max_wait_delay_s
 
         self.robots = {}
         self.tasks = {}
@@ -845,6 +930,9 @@ class MultiAgentTaskEnv(gym.Env):
         self.episode_obsolete_count = 0
         self.episode_pickup_count = 0
         self.episode_dropoff_count = 0
+        self._prev_completed_count = 0
+        self._prev_obsolete_count = 0
+        self._prev_pickup_count = 0
 
         if self.init_mode == "new":
             self.max_position = max(
@@ -952,7 +1040,7 @@ class MultiAgentTaskEnv(gym.Env):
         obs = self._build_observation()
         return obs, {"action_mask": self.action_mask()}
 
-    def _reset_new_mode(self):
+    def _reset_new_modeold(self):
         """Reset robots and tasks. Tasks injected via _release_pending_tasks."""
         self.robots = {}
         for agent in self.agents_data:
@@ -972,7 +1060,42 @@ class MultiAgentTaskEnv(gym.Env):
         # Start with empty task pool — release_pending_tasks fills it
         self.tasks = {}
         self._release_pending_tasks()
-
+    def _reset_new_mode(self):
+        self.robots = {}
+        for agent in self.agents_data:
+            robot_id = str(int(agent[0]))   # <<< str key
+            self.robots[robot_id] = {
+                "id": robot_id,
+                "x": float(agent[1]),
+                "y": float(agent[2]),
+                "max_capacity": self.max_robot_capacity,
+                "current_capacity": 0,
+                "assigned_tasks": [],
+                "current_task": None,
+                "task_phase": None,
+                "target_location": None,
+                "just_picked_up_task": None,  # <<< ADD: for shaped reward
+            }
+        self.tasks = {}
+        batch = self.tasks_batches[self.current_batch_idx]
+        for task_data in batch:
+            task_id = str(int(task_data[0]))   # <<< str key
+            self.tasks[task_id] = {
+                "id": task_id,
+                "pickup_x": float(task_data[1]),
+                "pickup_y": float(task_data[2]),
+                "dropoff_x": float(task_data[3]),
+                "dropoff_y": float(task_data[4]),
+                "release_time": float(task_data[5]),
+                "pickup_deadline": float(task_data[6]),
+                "est_travel_time": float(task_data[7]),
+                "dropoff_deadline": float(task_data[8]),
+                "is_assigned": False,
+                "is_obsolete": False,
+                "is_picked_up": False,
+                "is_completed": False,
+                "assigned_robot": None,
+            }
     def _reset_old_mode(self):
         """Reset for legacy mode."""
         pass
@@ -1015,7 +1138,7 @@ class MultiAgentTaskEnv(gym.Env):
     # STEP
     # =========================================================================
 
-    def step(self, actions: np.ndarray):
+    def stepold(self, actions: np.ndarray):
         """Execute one environment step."""
         prev_completed = self.episode_completed_count
         prev_obsolete  = self.episode_obsolete_count
@@ -1062,12 +1185,43 @@ class MultiAgentTaskEnv(gym.Env):
         }
 
         return obs, reward, terminated, truncated, info
-
+    def step(self, actions):
+        action_info = self._process_actions(actions)
+        self._update_task_deadlines()
+        self._execute_robot_movements_and_tasks()
+        self.current_time += 1.0
+        self.current_step += 1
+        reward = self._compute_rewards(action_info)
+        
+        # Inner no-op steps
+        for _ in range(self.decision_interval - 1):
+            if self._check_episode_done() or self.current_step >= self.max_steps:
+                break
+            self._update_task_deadlines()
+            self._execute_robot_movements_and_tasks()
+            self.current_time += 1.0
+            self.current_step += 1
+            reward += self._compute_rewards({})   # no-op actions
+        
+        terminated = self._check_episode_done()
+        truncated  = self.current_step >= self.max_steps
+        obs = self._build_observation()
+        info = {
+            "action_mask":      self.action_mask(),
+            "step":             self.current_step,
+            "time":             self.current_time,
+            "completed_count":  self.episode_completed_count,
+            "obsolete_count":   self.episode_obsolete_count,
+            "pickup_count":     self.episode_pickup_count,
+            "dropoff_count":    self.episode_dropoff_count,
+            "batch":            self.current_batch_idx,
+        }
+        return obs, reward, terminated, truncated, info
     # =========================================================================
     # ACTION PROCESSING
     # =========================================================================
 
-    def _process_actions(self, actions: np.ndarray) -> Dict[int, Dict]:
+    def _process_actionsold(self, actions: np.ndarray) -> Dict[int, Dict]:
         """
         Map policy actions to task assignments using last observation's candidates.
         Reuses _last_cand_task_ids to avoid double-computing candidates.
@@ -1107,12 +1261,43 @@ class MultiAgentTaskEnv(gym.Env):
                 robot["current_capacity"] += 1  # increment at assignment, decrement at dropoff
 
         return action_info
-
+    def _process_actions(self, actions):
+        # Collect all (robot, task, distance) assignment requests
+        robot_ids   = sorted(self.robots.keys())
+        action_info = {}
+        requests = []
+        for r_idx, action in enumerate(actions):
+            if action == self._noop_index:
+                continue
+            robot_id = robot_ids[r_idx]
+            cands = self._get_candidate_tasks(robot_id)
+            if action < len(cands):
+                task_id = cands[action]
+                robot = self.robots[robot_id]
+                dist = np.sqrt((robot["x"] - self.tasks[task_id]["pickup_x"])**2 +
+                            (robot["y"] - self.tasks[task_id]["pickup_y"])**2)
+                requests.append((dist, robot_id, task_id))
+        
+        # Sort by distance, assign greedily (closest wins conflicts)
+        requests.sort()
+        assigned_tasks = set()
+        action_info = {}
+        for dist, robot_id, task_id in requests:
+            if task_id in assigned_tasks:
+                action_info[robot_id] = {"action": ..., "assigned_task": None}
+                continue
+            robot = self.robots[robot_id]
+            if robot["current_capacity"] < self.max_robot_capacity:
+                robot["assigned_tasks"].append(task_id)
+                self.tasks[task_id]["is_assigned"] = True
+                assigned_tasks.add(task_id)
+                action_info[robot_id] = {"action": ..., "assigned_task": task_id}
+        return action_info
     # =========================================================================
     # CANDIDATE TASKS
     # =========================================================================
 
-    def _get_candidate_tasks(self, robot_id) -> List[int]:
+    def _get_candidate_tasksold(self, robot_id) -> List[int]:
         """
         Return available tasks within vicinity of robot, sorted by distance.
         Fallback to K_max nearest tasks if none are within vicinity.
@@ -1154,7 +1339,27 @@ class MultiAgentTaskEnv(gym.Env):
 
         # Return nearby if any, else fallback to K_max nearest
         return nearby[:self.K_max] if nearby else eligible[:self.K_max]
-
+    def _get_candidate_tasks(self, robot_id) -> List[str]:
+        robot = self.robots.get(str(robot_id))
+        if robot is None:
+            return []
+        candidates = []
+        for task_id, task in self.tasks.items():
+            if task.get("is_assigned") or task.get("is_completed") or task.get("is_obsolete"):
+                continue
+            if task.get("release_time", 0) > self.current_time:
+                continue
+            if task.get("pickup_deadline", float("inf")) <= self.current_time:
+                continue
+            dist = np.sqrt((robot["x"] - task["pickup_x"])**2 +
+                        (robot["y"] - task["pickup_y"])**2)
+            if dist <= self.vicinity_m:
+                candidates.append(task_id)   # <<< already str
+        candidates.sort(key=lambda tid: np.sqrt(
+            (robot["x"] - self.tasks[tid]["pickup_x"])**2 +
+            (robot["y"] - self.tasks[tid]["pickup_y"])**2
+        ))
+        return candidates[:self.K_max]
     # =========================================================================
     # TASK LIFECYCLE
     # =========================================================================
@@ -1229,11 +1434,12 @@ class MultiAgentTaskEnv(gym.Env):
         task    = self.tasks[task_id]
 
         if robot["task_phase"] == "pickup":
-            task["is_picked_up"]     = True
+            robot["current_capacity"] += 1
+            task["is_picked_up"] = True
             self.episode_pickup_count += 1
-            robot["task_phase"]      = "travel_to_dropoff"
+            robot["just_picked_up_task"] = task_id   # <<< ADD for reward shaping
+            robot["task_phase"] = "travel_to_dropoff"
             robot["target_location"] = (task["dropoff_x"], task["dropoff_y"])
-
         elif robot["task_phase"] == "travel_to_dropoff":
             robot["current_capacity"]   = max(0, robot["current_capacity"] - 1)
             task["is_completed"]        = True
@@ -1286,8 +1492,36 @@ class MultiAgentTaskEnv(gym.Env):
     # =========================================================================
     # REWARD
     # =========================================================================
+    def _compute_rewards(self, action_info):
+        new_complete = self.episode_completed_count - self._prev_completed_count
+        new_obsolete = self.episode_obsolete_count  - self._prev_obsolete_count
+        new_pickups  = self.episode_pickup_count    - self._prev_pickup_count
+        self._prev_completed_count = self.episode_completed_count
+        self._prev_obsolete_count  = self.episode_obsolete_count
+        self._prev_pickup_count    = self.episode_pickup_count
 
-    def _compute_rewards(
+        W_COMP     = 1.0
+        W_WAIT     = 1.5
+        W_DEADLINE = 5.0
+        WAIT_CAP   = max(1.0, float(self.max_wait_delay_s))
+
+        reward = float(new_complete) * W_COMP
+
+        # Wait penalty at pickup time
+        for robot in self.robots.values():
+            picked_id = robot.get("just_picked_up_task")
+            if picked_id:
+                t = self.tasks.get(picked_id)
+                if t is not None:
+                    wait_s = max(0.0, self.current_time - t["release_time"])
+                    reward += -(min(wait_s, WAIT_CAP) / WAIT_CAP) * W_WAIT
+                robot["just_picked_up_task"] = None
+
+        # Obsolete penalty
+        reward -= float(new_obsolete) * (W_DEADLINE * 0.5)
+
+        return reward
+    def _compute_rewardsold(
         self,
         action_info: Dict,
         completed_delta: int = 0,

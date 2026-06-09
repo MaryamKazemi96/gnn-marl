@@ -67,7 +67,7 @@ class RTGNNPolicy(ActorCriticPolicy):
         in_dim: int,
         hidden: int,
         k_max: int,
-        logit_temperature: float = 1.0,
+        logit_temperature: float = 5.0,
         noop_init: float = -1.0,
         freeze_noop_logit: bool = False,
         edge_dim: int = 0,
@@ -141,6 +141,8 @@ class RTGNNPolicy(ActorCriticPolicy):
         self.value_net = nn.Identity()
 
         # Rebuild optimizer AFTER adding gnn_ac + noop_logit
+        gnn_params = list(self.gnn_ac.parameters())
+        assert len(gnn_params) > 0, "GNN has no parameters before _build"
         self._build(lr_schedule)
 
     # ---------------- helpers ----------------

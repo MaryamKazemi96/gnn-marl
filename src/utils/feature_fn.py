@@ -354,13 +354,18 @@ def make_feature_fn(
         if isinstance(x, dict):
             return x
         
-        task_id = str(x) if x is not None else ""
-        try:
-            if hasattr(env_state, "tasks"):
-                return env_state.tasks.get(task_id)
-        except Exception:
-            pass
+        # task_id = str(x) if x is not None else ""
+        # try:
+        #     if hasattr(env_state, "tasks"):
+        #         return env_state.tasks.get(task_id)
+        # except Exception:
+        #     pass
         
+        # return None
+        for key in (x, str(x) if x is not None else None, 
+                int(x) if str(x).isdigit() else None):
+            if key is not None and key in env_state.tasks:
+                return env_state.tasks[key]
         return None
 
     # ============================================================================
