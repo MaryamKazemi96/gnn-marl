@@ -94,15 +94,15 @@ class MultiAgentTaskEnv(gym.Env):
         E_max: int = 50,
         K_max: int = 5,
         max_robot_capacity: int = 2,
-        max_wait_delay_s: float = 60.0,
+        max_wait_delay_s: float = 600.0,
         max_travel_delay_s: float = 3600.0,
-        max_steps: int = 1000,
+        max_steps: int = 2000,
         two_hop: bool = False,
         two_hop_directed: bool = False,
-        vicinity_m: float = 40.0,
+        vicinity_m: float = 100.0,
         movement_speed: float = 1.0,
-        decision_interval: int = 7,
-        radius: int = 20,
+        decision_interval: int = 8,
+        radius: int = 100,
         feature_size: int = 9,
         use_true_id: bool = False,
         reward_mode: str = "new",
@@ -285,7 +285,7 @@ class MultiAgentTaskEnv(gym.Env):
 
         # Start with empty task pool — release_pending_tasks fills it
         self.tasks = {}
-        self._release_pending_tasks()
+        # self._release_pending_tasks()
     def _reset_new_mode(self):
         self.robots = {}
         for agent in self.agents_data:
@@ -303,6 +303,7 @@ class MultiAgentTaskEnv(gym.Env):
                 "just_picked_up_task": None,  # <<< ADD: for shaped reward
             }
         self.tasks = {}
+        # self._release_pending_tasks()
         batch = self.tasks_batches[self.current_batch_idx]
         for task_data in batch:
             task_id = str(int(task_data[0]))   # <<< str key
@@ -361,7 +362,7 @@ class MultiAgentTaskEnv(gym.Env):
         #           f"total={len(self.tasks)}")
 
     # =========================================================================
-    # STEP
+    # STEP 
     # =========================================================================
 
     def stepold(self, actions: np.ndarray):
@@ -395,8 +396,8 @@ class MultiAgentTaskEnv(gym.Env):
         # 7. Check termination
         terminated = self._check_episode_done()
         truncated  = self.current_step >= self.max_steps
-        print(f"Step {self.current_step}: reward={reward:.2f}, ")
-        print(f"terminated={terminated}, truncated={truncated}, completed={self.episode_completed_count}, ")
+        # print(f"Step {self.current_step}: reward={reward:.2f}, ")
+        # print(f"terminated={terminated}, truncated={truncated}, completed={self.episode_completed_count}, ")
         # 8. Build observation
         obs = self._build_observation()
 
@@ -414,6 +415,8 @@ class MultiAgentTaskEnv(gym.Env):
         return obs, reward, terminated, truncated, info
     def step(self, actions):
         action_info = self._process_actions(actions)
+        # print(action_info,'action info')
+        self._release_pending_tasks()
         self._update_task_deadlines()
         self._execute_robot_movements_and_tasks()
         self.current_time += 1.0
@@ -421,10 +424,14 @@ class MultiAgentTaskEnv(gym.Env):
         reward = self._compute_rewards(action_info)
         
         # Inner no-op steps
-        
+        # print(decision_interval := self.decision_interval)
+        # print(max_steps := self.max_steps)
+        # print(current_step := self.current_step)
         for _ in range(self.decision_interval - 1):
             if self.current_step >= self.max_steps:
                 break
+
+            self._release_pending_tasks()
             self._update_task_deadlines()
             self._execute_robot_movements_and_tasks()
             self.current_time += 1.0
@@ -432,11 +439,12 @@ class MultiAgentTaskEnv(gym.Env):
             reward += self._compute_rewards({})   # no-op actions
             if self._check_episode_done():
                 break
-        
+            # print(f"Step {self.current_step}: reward={reward:.2f}, done={self._check_episode_done()}, completed={self.episode_completed_count}, ")
+            
         terminated = self._check_episode_done()
         truncated  = self.current_step >= self.max_steps
-        # print(f"Step {self.current_step}: reward={reward:.2f}, ")
-        # print(f"terminated={terminated}, truncated={truncated}, completed={self.episode_completed_count}, ")
+        print(f"Step {self.current_step}: reward={reward:.2f}, ")
+        print(f"terminated={terminated}, truncated={truncated}, completed={self.episode_completed_count}, ")
         
         obs = self._build_observation()
         info = {
@@ -633,7 +641,9 @@ class MultiAgentTaskEnv(gym.Env):
             assigned_robot_id = task.get("assigned_robot")
             if assigned_robot_id and assigned_robot_id in self.robots:
                 robot = self.robots[assigned_robot_id]
-                robot["current_capacity"] = max(0, robot["current_capacity"] - 1)
+                print(f"Step {self.current_step}: Task {task_id} became obsolete, freeing robot {assigned_robot_id}")
+                if task["is_picked_up"]:
+                    robot["current_capacity"] = max(0, robot["current_capacity"] - 1)
                 if task_id in robot["assigned_tasks"]:
                     robot["assigned_tasks"].remove(task_id)
                 if robot["current_task"] == task_id:
@@ -658,6 +668,7 @@ class MultiAgentTaskEnv(gym.Env):
                 )
 
             if robot["current_task"] is not None:
+                # print(f"Robot {robot_id} moving toward task {robot['current_task']} at phase {robot['task_phase']}")
                 self._move_robot_toward_target(robot_id)
 
     def _move_robot_toward_target(self, robot_id):
@@ -827,6 +838,13 @@ class MultiAgentTaskEnv(gym.Env):
     #     # print(f"Checking episode done: active_tasks={active_tasks}, robots_idle={robots_idle}")
     #     return active_tasks == 0 and robots_idle
     def _check_episode_done(self):
+        for batch in self.tasks_batches:
+            for task_data in batch:
+                if str(int(task_data[0])) not in self.tasks:
+                    # print(f"Episode not done: task {int(task_data[0])} not yet released in {self.tasks}")
+                    # print(f"Episode not done: task {int(task_data[0])} not yet released")
+                    return False
+                
         any_pending = any(
             not t.get("is_completed") and not t.get("is_obsolete")
             for t in self.tasks.values()

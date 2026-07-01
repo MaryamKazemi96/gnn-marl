@@ -65,13 +65,17 @@
 #   route_slots_k: 2
 
   # GNN-PPO Training Configuration
-
+# Robot Parameters
+max_robot_capacity: 3
+max_wait_delay_s:   600.0
+max_travel_delay_s: 3600.0
 # Environment parameters
-num_robots: 4
+num_robots: 6
 num_tasks: 40
-radius: 30
+radius: 100
+
 batch_time: 180
-vicinity_m: 30
+vicinity_m: 100
 
 
 # Graph parameters
@@ -87,15 +91,17 @@ use_ego_robot: true
 use_edge_rt: false
 
 # 2-hop parameters
-two_hop: true
+two_hop: false
 
 # Decision making
 decision_interval: 8  # Steps between policy decisions
 
 # PPO parameters
 ppo_steps: 1024
-batch_size: 64
+batch_size: 256
 learning_rate: 0.0003
-total_timesteps: 50000
+total_timesteps: 2
+noop_init:   -1.0      
 
-max_steps: 2500
+
+max_steps: 100

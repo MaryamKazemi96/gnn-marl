@@ -94,7 +94,7 @@ class GNNPPOEnvWrapper(gym.Env):
 
     def step(self, action: np.ndarray) -> Tuple[Dict, float, bool, bool, Dict]:
         obs, reward, terminated, truncated, info = self.base_env.step(action)
-
+        print(f"Step: reward={reward:.3f}, terminated={terminated}, truncated={truncated}")
         self._episode_return += reward
 
         if terminated or truncated:

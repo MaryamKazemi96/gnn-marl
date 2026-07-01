@@ -199,7 +199,7 @@ def main():
         "ppo_steps":          2048,
         "batch_size":         64,
         "learning_rate":      3e-4,
-        "total_timesteps":    100000,
+        "total_timesteps":    10000,
         "checkpoint_freq":    10000,
         "seed":               42,
         "noop_init":          -1.0,
@@ -213,34 +213,19 @@ def main():
     run_id = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     two_hop = config.get("two_hop", False)
 
-    # ── Directories ───────────────────────────────────────────────────────────
+ 
     run_dir   = Path("runs") / f"seed_{seed}" / f"run_{run_id}"
-    model_dir = Path(config.get("model_save_dir", "models"))
+    model_dir = run_dir / "models" #Path(config.get("model_save_dir", "models"))
     tb_dir    = run_dir / "tensorboard"
     log_dir   = run_dir / "logs"
     for d in [run_dir, model_dir, tb_dir, log_dir]:
         d.mkdir(parents=True, exist_ok=True)
     output_file = run_dir / "train_output.txt"
     Tee(str(output_file), mode="a" if continue_training else "w")
-    print(f"✓ Run dir   : {run_dir}")
-    print(f"✓ Model dir : {model_dir}")
+    print(f" Run dir   : {run_dir}")
+    print(f" Model dir : {model_dir}")
 
-    # ── Metadata ──────────────────────────────────────────────────────────────
-    (run_dir / "run_metadata.json").write_text(json.dumps({
-        "run_id":    run_id,
-        "seed":      seed,
-        "continue":  continue_training,
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
-        "git":       get_git_commit(),
-        "platform": {
-            "python": platform.python_version(),
-            "system": platform.platform(),
-            "cuda":   th.cuda.is_available(),
-        },
-        "config": config,
-    }, indent=2))
-
-    # ── Data ─────────────────────────────────────────────────────────────────
+    
     try:
         agents, tasks_batches = load_generated_data(
             config.get("data_dir", "data"),
@@ -251,8 +236,8 @@ def main():
         traceback.print_exc()
         return
 
-    # ── Environment ───────────────────────────────────────────────────────────
     print("\nCreating environment...")
+    print('two hop flag',two_hop)
     try:
         base_env = MultiAgentTaskEnv(
             agents=agents,
@@ -276,10 +261,10 @@ def main():
         )
 
         feature_dim = base_env.F
-        print(f"  ✓ Feature dim  : {feature_dim}")
-        print(f"  ✓ Action space : {base_env.action_space}")
-        print(f"  ✓ two_hop      : {two_hop}")
-        print(f"  ✓ vicinity_m   : {config.get('vicinity_m', 40.0)}")
+        print(f"   Feature dim  : {feature_dim}")
+        print(f"   Action space : {base_env.action_space}")
+        print(f"   two_hop      : {two_hop}")
+        print(f"   vicinity_m   : {config.get('vicinity_m', 40.0)}")
 
         # Monitor with episode_reward as tracked keyword
         # action_mask stays in info as-is — RTGNNPolicy handles masking internally
@@ -311,7 +296,6 @@ def main():
         gnn_kwargs={"layers": int(config.get("gnn_layers", 2))},
     )
 
-    # ── Model — new or continue ───────────────────────────────────────────────
     device = "cuda" if th.cuda.is_available() else "cpu"
     print(f"\nDevice: {device}")
 
@@ -343,7 +327,7 @@ def main():
 
             # Force noop_logit to config value (matches colleague's pattern)
             model.policy.noop_logit.data.fill_(float(config.get("noop_init", -1.0)))
-            print(f"  ✓ noop_logit set to: {model.policy.noop_logit.item():.3f}")
+            print(f"   noop_logit set to: {model.policy.noop_logit.item():.3f}")
 
             # Save init model (matches colleague's pattern)
             init_path = model_dir / "model_episode0_ts0.zip"
@@ -389,6 +373,20 @@ def main():
         except Exception as e:
             print(f"Save failed: {e}")
 
+
+    #metadata
+    # Metadata
+    metadata = {
+    "config": config,
+    "policy_kwargs": policy_kwargs,
+    "locals": {
+        k: str(v)
+        for k, v in locals().items()
+        if k not in ["agents", "tasks_batches"]
+    }
+}
+    with open(run_dir / "run_metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2, default=str)
     # ── Summary ───────────────────────────────────────────────────────────────
     print("\n" + "=" * 80)
     print(f"  Run dir    : {run_dir}")

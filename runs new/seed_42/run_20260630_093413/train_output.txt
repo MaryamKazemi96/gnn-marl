@@ -1,0 +1,139 @@
+✓ Run dir   : runs/seed_42/run_20260630_093413
+✓ Model dir : models
+Loading data...
+  ✓ Agents: (6, 3)
+  ✓ Batch 0: (8, 9)
+  ✓ Batch 1: (8, 9)
+  ✓ Batch 2: (8, 9)
+  ✓ Batch 3: (8, 9)
+  ✓ Batch 4: (8, 9)
+  ✓ Batch 5: (8, 9)
+  ✓ Batch 6: (8, 9)
+  ✓ Batch 7: (8, 9)
+  ✓ Batch 8: (8, 9)
+  ✓ Batch 9: (8, 9)
+  ✓ Total: 6 robots, 10 batches
+
+Creating environment...
+two hop flag False
+  ✓ Feature dim  : 12
+  ✓ Action space : MultiDiscrete([6 6 6 6 6 6])
+  ✓ two_hop      : False
+  ✓ vicinity_m   : 30
+
+Device: cuda
+Using cuda device
+Wrapping the env in a DummyVecEnv.
+  ✓ noop_logit set to: -1.000
+  ✓ Init model saved: model_episode0_ts0.zip
+
+================================================================================
+STARTING TRAINING
+================================================================================
+
+Logging to runs/seed_42/run_20260630_093413/tensorboard/PPO_1
+  Timesteps:     600 | Reward:     7.26 | Length:     22 | Completed: 8 | Obsolete: 0
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 28.2     |
+|    ep_rew_mean     | 4.95     |
+| time/              |          |
+|    fps             | 133      |
+|    iterations      | 1        |
+|    time_elapsed    | 7        |
+|    total_timesteps | 1024     |
+---------------------------------
+------------------------------------------
+| rollout/                |              |
+|    ep_len_mean          | 29           |
+|    ep_rew_mean          | 5.04         |
+| time/                   |              |
+|    fps                  | 23           |
+|    iterations           | 2            |
+|    time_elapsed         | 88           |
+|    total_timesteps      | 2048         |
+| train/                  |              |
+|    approx_kl            | 0.0004482653 |
+|    clip_fraction        | 0.00859      |
+|    clip_range           | 0.2          |
+|    entropy_loss         | -0.587       |
+|    explained_variance   | -0.00688     |
+|    learning_rate        | 0.0003       |
+|    loss                 | 1.55         |
+|    n_updates            | 10           |
+|    policy_gradient_loss | -0.000757    |
+|    value_loss           | 4.36         |
+------------------------------------------
+------------------------------------------
+| rollout/                |              |
+|    ep_len_mean          | 28.9         |
+|    ep_rew_mean          | 5.05         |
+| time/                   |              |
+|    fps                  | 17           |
+|    iterations           | 3            |
+|    time_elapsed         | 179          |
+|    total_timesteps      | 3072         |
+| train/                  |              |
+|    approx_kl            | 0.0017993983 |
+|    clip_fraction        | 0.0176       |
+|    clip_range           | 0.2          |
+|    entropy_loss         | -0.555       |
+|    explained_variance   | 0.101        |
+|    learning_rate        | 0.0003       |
+|    loss                 | 1.23         |
+|    n_updates            | 20           |
+|    policy_gradient_loss | -0.00184     |
+|    value_loss           | 3.63         |
+------------------------------------------
+-------------------------------------------
+| rollout/                |               |
+|    ep_len_mean          | 28.8          |
+|    ep_rew_mean          | 4.76          |
+| time/                   |               |
+|    fps                  | 16            |
+|    iterations           | 4             |
+|    time_elapsed         | 252           |
+|    total_timesteps      | 4096          |
+| train/                  |               |
+|    approx_kl            | 0.00021360019 |
+|    clip_fraction        | 0.00811       |
+|    clip_range           | 0.2           |
+|    entropy_loss         | -0.582        |
+|    explained_variance   | 0.246         |
+|    learning_rate        | 0.0003        |
+|    loss                 | 0.845         |
+|    n_updates            | 30            |
+|    policy_gradient_loss | -0.000611     |
+|    value_loss           | 3.77          |
+-------------------------------------------
+-------------------------------------------
+| rollout/                |               |
+|    ep_len_mean          | 28.6          |
+|    ep_rew_mean          | 4.8           |
+| time/                   |               |
+|    fps                  | 16            |
+|    iterations           | 5             |
+|    time_elapsed         | 316           |
+|    total_timesteps      | 5120          |
+| train/                  |               |
+|    approx_kl            | 0.00022662956 |
+|    clip_fraction        | 0.000879      |
+|    clip_range           | 0.2           |
+|    entropy_loss         | -0.573        |
+|    explained_variance   | 0.25          |
+|    learning_rate        | 0.0003        |
+|    loss                 | 1.2           |
+|    n_updates            | 40            |
+|    policy_gradient_loss | -0.000311     |
+|    value_loss           | 4.19          |
+-------------------------------------------
+
+✓ Training complete!
+✓ Final model saved: runs/seed_42/run_20260630_093413/ppo_final.zip
+
+================================================================================
+  Run dir    : runs/seed_42/run_20260630_093413
+  TensorBoard: tensorboard --logdir runs/seed_42/run_20260630_093413/tensorboard
+  Finished   : 2026-06-30T12:40:48.476877
+================================================================================
+
