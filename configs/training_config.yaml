@@ -67,7 +67,7 @@
   # GNN-PPO Training Configuration
 # Robot Parameters
 max_robot_capacity: 3
-max_wait_delay_s:   600.0
+max_wait_delay_s:   200.0
 max_travel_delay_s: 3600.0
 # Environment parameters
 num_robots: 6
@@ -97,11 +97,11 @@ two_hop: false
 decision_interval: 8  # Steps between policy decisions
 
 # PPO parameters
-ppo_steps: 1024
-batch_size: 256
+ppo_steps: 2048
+batch_size: 64
 learning_rate: 0.0003
-total_timesteps: 2
+total_timesteps: 10000
 noop_init:   -1.0      
 
 
-max_steps: 100
+max_steps: 2500

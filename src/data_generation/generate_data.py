@@ -86,7 +86,7 @@ class DataGenerator:
                 estimated_travel_time = len(path) if found else float('inf')
 
                 # Calculate deadlines
-                pickup_deadline = t_release + self.max_waiting_time
+                pickup_deadline = (t_release + 0.8) * self.max_waiting_time
                 drop_off_deadline = pickup_deadline + (estimated_travel_time * (1 + self.max_travel_delay_percentage))
 
                 # Generate a unique ID (task)
