@@ -185,6 +185,7 @@ class MultiAgentTaskEnv(gym.Env):
         self.movement_speed     = movement_speed
         self.decision_interval  = decision_interval
         self.max_wait_delay_s   = max_wait_delay_s
+        self.max_travel_delay_s = max_travel_delay_s
 
         self.robots       = {}
         self.tasks        = {}
@@ -405,8 +406,7 @@ class MultiAgentTaskEnv(gym.Env):
         self.current_time  += 1.0
         self.current_step  += 1
         reward = self._compute_rewards(action_info)
-
-        # Inner no-op ticks (robots keep moving, no new policy decisions)
+        # print(f"step {self.current_step}: action_info={action_info}, released tasks={[t['id'] for t in self.tasks.values() if t['release_time'] <= self.current_time]}")
         for _ in range(self.decision_interval - 1):
             if self.current_step >= self.max_steps:
                 break
@@ -416,12 +416,14 @@ class MultiAgentTaskEnv(gym.Env):
             self.current_time  += 1.0
             self.current_step  += 1
             reward += self._compute_rewards({})
+            
             if self._check_episode_done():
                 break
 
         terminated = self._check_episode_done()
         truncated  = self.current_step >= self.max_steps
         # print(f"Step {self.current_step}: reward={reward:.3f}, completed={self.episode_completed_count}, obsolete={self.episode_obsolete_count}, pickup={self.episode_pickup_count}, dropoff={self.episode_dropoff_count}, batches={len(self.tasks_batches)}, tasks={len(self.tasks)}")
+        # print(f"Robots: {[{'id': r['id'], 'x': r['x'], 'y': r['y'], 'current_capacity': r['current_capacity'], 'assigned_tasks': r['assigned_tasks'], 'current_task': r['current_task'], 'task_phase': r['task_phase']} for r in self.robots.values()]}")
         obs  = self._build_observation()
         info = {
             "action_mask":     self.action_mask(),
@@ -463,6 +465,9 @@ class MultiAgentTaskEnv(gym.Env):
                 break
             robot_id = robot_ids[r_idx]
             cands    = self._get_candidate_tasks(robot_id)
+            # print(f"Robot {robot_id} candidates: {cands}, action={action}")
+            # cands2 = self._last_cand_task_ids[r_idx]
+            # print(f"Robot {robot_id} candidates: {cands2}, action={action}")
             if int(action) >= len(cands):
                 continue
             task_id = cands[int(action)]
@@ -768,8 +773,101 @@ class MultiAgentTaskEnv(gym.Env):
     # =========================================================================
     # REWARD
     # =========================================================================
-
     def _compute_rewards(self, action_info) -> float:
+        robots = self.robots.values()
+
+        W_COMP = 10.0
+        W_WAIT = 1.5
+        W_DEADLINE = 5.0
+        W_TRAVEL = 2.0
+
+        WAIT_CAP = self.max_wait_delay_s
+        DEADLINE_CAP = self.max_travel_delay_s
+
+        reward = 0.0
+
+        # =========================================================
+        # 1. PICKUP EVENTS (WAIT penalty + implicit progress signal)
+        # =========================================================
+        for r in robots:
+            task_id = r.get("just_picked_up_task")
+            if not task_id:
+                continue
+
+            task = self.tasks.get(task_id)
+            if task is None:
+                continue
+
+            # wait time since release
+            wait = max(0.0, self.current_time - task["release_time"])
+            wait_pen = -min(wait, WAIT_CAP) / WAIT_CAP
+
+            reward += W_WAIT * wait_pen
+
+            # optional: store pickup time
+            task["pickup_time"] = self.current_time
+
+            r["just_picked_up_task"] = None
+
+        # =========================================================
+        # 2. DROPOFF EVENTS (MAIN REWARD SIGNAL)
+        # =========================================================
+        for task_id, task in self.tasks.items():
+            if not task.get("is_completed"):
+                continue
+
+            # ensure single counting
+            if task.get("_rewarded"):
+                continue
+            task["_rewarded"] = True
+
+            rid = task.get("assigned_robot")
+            if rid is None:
+                continue
+
+            # completion reward
+            reward += W_COMP
+
+            # deadline quality (pickup + dropoff correctness)
+            pickup_time = task.get("pickup_time", self.current_time)
+            dropoff_time = task.get("dropoff_time", self.current_time)
+
+            # pickup lateness
+            if task.get("pickup_deadline") is not None:
+                late_p = max(0.0, pickup_time - task["pickup_deadline"])
+                reward += W_DEADLINE * (-min(late_p, DEADLINE_CAP) / DEADLINE_CAP)
+
+            # dropoff lateness
+            if task.get("dropoff_deadline") is not None:
+                late_d = max(0.0, dropoff_time - task["dropoff_deadline"])
+                reward += W_DEADLINE * (-min(late_d, DEADLINE_CAP) / DEADLINE_CAP)
+
+            task["dropoff_time"] = self.current_time
+
+        # =========================================================
+        # 3. OBSOLETE TASK PENALTY (strong failure signal)
+        # =========================================================
+        for task_id, task in self.tasks.items():
+            if not task.get("is_obsolete"):
+                continue
+
+            if task.get("_obsolete_rewarded"):
+                continue
+            task["_obsolete_rewarded"] = True
+
+            rid = task.get("assigned_robot")
+            if rid is None:
+                continue
+
+            # stronger penalty than completion reward
+            reward += -W_COMP * 0.5
+
+            # additional deadline-based penalty
+            late = max(0.0, self.current_time - task.get("pickup_deadline", self.current_time))
+            reward += W_DEADLINE * (-min(late, DEADLINE_CAP) / DEADLINE_CAP)
+        # print(f"Step {self.current_step}: reward={reward:.3f}, completed={self.episode_completed_count}, obsolete={self.episode_obsolete_count}, pickup={self.episode_pickup_count}, dropoff={self.episode_dropoff_count}")
+        return float(reward)
+    def _compute_rewardsold(self, action_info) -> float:
         """
         Shaped reward with incremental deltas:
           +W_COMP  per completed task
@@ -784,7 +882,7 @@ class MultiAgentTaskEnv(gym.Env):
         self._prev_pickup_count    = self.episode_pickup_count
         self._prev_dropoff_count   = self.episode_dropoff_count
 
-        W_COMP     = 1.0
+        W_COMP     = 10.0
         W_WAIT     = 1.5
         W_DEADLINE = 5.0
         WAIT_CAP   = max(1.0, float(self.max_wait_delay_s))
@@ -800,10 +898,11 @@ class MultiAgentTaskEnv(gym.Env):
                     wait_s  = max(0.0, self.current_time - t["release_time"])
                     reward += -(min(wait_s, WAIT_CAP) / WAIT_CAP) * W_WAIT
                 robot["just_picked_up_task"] = None
+                print(f"Robot {robot['id']} picked up task {picked_id} at time {self.current_time:.1f}, wait={wait_s:.1f}s, reward delta={-(min(wait_s, WAIT_CAP) / WAIT_CAP) * W_WAIT:.3f}")
 
         # Obsolescence penalty
-        reward -= float(new_obsolete) * (W_DEADLINE * 0.5)
-
+        reward -= float(new_obsolete) * (W_DEADLINE)
+        print(f"Step {self.current_step}: reward completed={new_complete * W_COMP}, obsolete={new_obsolete* (W_DEADLINE)} total reward={reward:.3f}")
         return reward
 
     # =========================================================================
