@@ -6,11 +6,11 @@ import datetime
 import subprocess
 import traceback
 from pathlib import Path
-from typing import Optional, Dict
-
+from typing import Optional, Dict, List
 import numpy as np
 import torch as th
 import yaml
+import random 
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
@@ -103,12 +103,62 @@ def _latest_model_path(model_dir: str):
     ts, ep, path = sorted(candidates)[-1]
     return path, ep, ts
 
+def set_global_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    th.manual_seed(seed)
+    if th.cuda.is_available():
+        th.cuda.manual_seed(seed)
+        th.cuda.manual_seed_all(seed)
+    # Keep minimal changes; no forced deterministic flags unless you want strict reproducibility.
+
+
+def get_seed_list(config: Dict) -> List[int]:
+    # Preferred: seeds: [1,2,3]
+    if "seeds" in config and config["seeds"] is not None:
+        seeds = [int(s) for s in config["seeds"]]
+        if len(seeds) == 0:
+            raise ValueError("Config key 'seeds' is empty.")
+        return seeds
+    # Fallback: seed: 42
+    return [int(config.get("seed", 42))]
 
 # ============================================================================
 # Callbacks
 # ============================================================================
-
 class TrainingLogCallback(BaseCallback):
+    def __init__(self, log_freq: int = 100, verbose: int = 1):
+        super().__init__(verbose)
+        self.log_freq = log_freq
+        self.step_count = 0
+
+    def _on_step(self) -> bool:
+        self.step_count += 1
+        if self.step_count % self.log_freq != 0:
+            return True
+
+        for info in self.locals.get("infos", []):
+            if "episode" not in info:
+                continue
+            ep = info["episode"]
+
+            ep_total = max(1, int(info.get("ep_total_action_count", 0)))
+            inv_rate = float(info.get("ep_invalid_action_count", 0)) / ep_total
+            cap_rate = float(info.get("ep_capacity_rejected_count", 0)) / ep_total
+            cfl_rate = float(info.get("ep_conflict_dropped_count", 0)) / ep_total
+
+            print(
+                f"TS:{self.num_timesteps:7d} | "
+                f"R:{ep.get('r', float('nan')):8.2f} | L:{ep.get('l', -1):5d} | "
+                f"C:{info.get('completed_count', '?'):3} O:{info.get('obsolete_count', '?'):3} | "
+                f"Inv:{inv_rate:6.3f} CapRej:{cap_rate:6.3f} Cfl:{cfl_rate:6.3f} | "
+                f"r_comp:{info.get('ep_r_comp', 0.0):7.2f} "
+                f"r_wait:{info.get('ep_r_wait', 0.0):7.2f} "
+                f"r_dead:{info.get('ep_r_deadline', 0.0):7.2f} "
+                f"r_obs:{info.get('ep_r_obsolete', 0.0):7.2f}"
+            )
+        return True
+class TrainingLogCallbackold(BaseCallback):
     """Console logging of episode metrics."""
 
     def __init__(self, log_freq: int = 100, verbose: int = 1):
@@ -317,14 +367,27 @@ def main():
                 gamma=0.99,
                 clip_range=0.2,
                 vf_coef=0.5,
-                ent_coef=0.01,
+                ent_coef=config["ent_coef"],
                 gae_lambda=0.95,
-                n_epochs=10,
+                n_epochs=5,
                 verbose=1,
                 device=device,
                 tensorboard_log=str(tb_dir),
             )
+            # ------------------------optimizer check
+            actor_ids = {id(p) for p in model.policy.gnn_ac.parameters()} | {id(model.policy.noop_logit)}
+            opt_ids = {id(p) for g in model.policy.optimizer.param_groups for p in g["params"]}
+            missing = actor_ids - opt_ids
+            assert not missing, f"{len(missing)} actor params NOT in optimizer — this is the bug"
+            print(f"actor params: {len(actor_ids)}, in optimizer: {len(actor_ids & opt_ids)}")
 
+            print("\n=== ACTOR PARAMETERS ===")
+            for name, p in model.policy.gnn_ac.named_parameters():
+                print(f"{name:40s} requires_grad={p.requires_grad} shape={tuple(p.shape)}")
+            print("========================\n")
+
+
+            # ------------------------
             # Force noop_logit to config value (matches colleague's pattern)
             model.policy.noop_logit.data.fill_(float(config.get("noop_init", -1.0)))
             print(f"   noop_logit set to: {model.policy.noop_logit.item():.3f}")

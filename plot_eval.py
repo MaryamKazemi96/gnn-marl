@@ -655,6 +655,239 @@ def find_latest_run(seed: int) -> Path:
         raise FileNotFoundError(f"No runs found in {base}")
 
     return runs[-1]
+def plot_noop_and_action_diagnostics(det_data, stoch_data, out_png):
+    """NOOP fraction per episode + aggregate action-index histogram."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), facecolor="white")
+
+    # --- Left: NOOP fraction over episodes ---
+    ax = axes[0]
+    for label, color, data in [("PPO Det", "#2980b9", det_data), ("PPO Stoch", "#27ae60", stoch_data)]:
+        if not data or "noop_fractions" not in data:
+            continue
+        nf = np.asarray(data["noop_fractions"], dtype=float)
+        if nf.size == 0:
+            continue
+        ax.plot(np.arange(1, nf.size + 1), nf, color=color, lw=1.8,
+                label=f"{label} – mean {nf.mean():.2%}")
+    ax.set_xlabel("Episode", fontweight="bold"); ax.set_ylabel("NOOP fraction", fontweight="bold")
+    ax.set_title("Fraction of decisions that were NOOP", fontweight="bold")
+    ax.set_ylim(0, 1); ax.legend(); ax.grid(alpha=0.25)
+
+    # --- Right: aggregate action-index histogram (which candidate slot / noop gets picked) ---
+    ax = axes[1]
+    for label, color, data in [("PPO Det", "#2980b9", det_data), ("PPO Stoch", "#27ae60", stoch_data)]:
+        if not data or "action_hists" not in data or not data["action_hists"]:
+            continue
+        hists = np.asarray(data["action_hists"], dtype=float)
+        agg = hists.sum(axis=0)
+        agg = agg / agg.sum()
+        idx = np.arange(agg.size)
+        ax.bar(idx + (0.0 if label == "PPO Det" else 0.35), agg, width=0.35, label=label, color=color, alpha=0.8)
+    ax.set_xlabel("Action index (last = NOOP)", fontweight="bold")
+    ax.set_ylabel("Fraction of decisions", fontweight="bold")
+    ax.set_title("Chosen action-slot distribution", fontweight="bold")
+    ax.legend(); ax.grid(alpha=0.25, axis="y")
+
+    _save_fig(fig, out_png)
+
+def _safe_series(d: Optional[Dict], key: str) -> np.ndarray:
+    if not d:
+        return np.array([], dtype=float)
+    arr = d.get(key, [])
+    return np.asarray(arr, dtype=float) if arr is not None else np.array([], dtype=float)
+
+def _safe_rate(num: np.ndarray, den: np.ndarray) -> np.ndarray:
+    if num.size == 0 or den.size == 0:
+        return np.array([], dtype=float)
+    n = min(num.size, den.size)
+    num = num[:n]
+    den = den[:n]
+    out = np.zeros_like(num, dtype=float)
+    mask = den > 0
+    out[mask] = num[mask] / den[mask]
+    return out
+
+
+def plot_reward_components_debug(det_data, stoch_data, out_png, ma_window=5):
+    fig, axes = plt.subplots(2, 1, figsize=(14, 8), facecolor="white")
+
+    for ax, data, title, color_base in [
+        (axes[0], det_data, "Deterministic", "#2980b9"),
+        (axes[1], stoch_data, "Stochastic", "#27ae60"),
+    ]:
+        if not data:
+            ax.set_title(f"{title}: no data")
+            continue
+
+        comp = _safe_series(data, "ep_r_comp")
+        wait = _safe_series(data, "ep_r_wait")
+        dead = _safe_series(data, "ep_r_deadline")
+        obs  = _safe_series(data, "ep_r_obsolete")
+        n = max(comp.size, wait.size, dead.size, obs.size)
+        if n == 0:
+            ax.set_title(f"{title}: reward component logs not found")
+            continue
+
+        x = np.arange(1, n + 1)
+
+        def pad(a):
+            if a.size == n:
+                return a
+            b = np.zeros(n, dtype=float)
+            b[:min(n, a.size)] = a[:min(n, a.size)]
+            return b
+
+        comp = _moving_average(pad(comp), ma_window)
+        wait = _moving_average(pad(wait), ma_window)
+        dead = _moving_average(pad(dead), ma_window)
+        obs  = _moving_average(pad(obs),  ma_window)
+
+        ax.plot(x, comp, lw=2.2, label="r_comp")
+        ax.plot(x, wait, lw=2.2, label="r_wait")
+        ax.plot(x, dead, lw=2.2, label="r_deadline")
+        ax.plot(x, obs,  lw=2.2, label="r_obsolete")
+        ax.axhline(0.0, color="black", lw=1, alpha=0.4)
+        ax.set_title(f"{title}: Reward Components (MA)", fontweight="bold")
+        ax.set_ylabel("Episode component sum")
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=9)
+
+    axes[1].set_xlabel("Episode", fontweight="bold")
+    _save_fig(fig, out_png)
+
+
+def plot_action_quality_rates_debug(det_data, stoch_data, out_png, ma_window=5):
+    fig, axes = plt.subplots(2, 1, figsize=(14, 8), facecolor="white")
+
+    for ax, data, title, color in [
+        (axes[0], det_data, "Deterministic", "#2980b9"),
+        (axes[1], stoch_data, "Stochastic", "#27ae60"),
+    ]:
+        if not data:
+            ax.set_title(f"{title}: no data")
+            continue
+
+        inv = _safe_series(data, "ep_invalid_action_count")
+        tot = _safe_series(data, "ep_total_action_count")
+        cap = _safe_series(data, "ep_capacity_rejected_count")
+        cfl = _safe_series(data, "ep_conflict_dropped_count")
+
+        inv_r = _safe_rate(inv, tot)
+        cap_r = _safe_rate(cap, tot)
+        cfl_r = _safe_rate(cfl, tot)
+
+        n = max(inv_r.size, cap_r.size, cfl_r.size)
+        if n == 0:
+            ax.set_title(f"{title}: action-quality logs not found")
+            continue
+
+        x = np.arange(1, n + 1)
+
+        def pad(a):
+            if a.size == n:
+                return a
+            b = np.zeros(n, dtype=float)
+            b[:min(n, a.size)] = a[:min(n, a.size)]
+            return b
+
+        ax.plot(x, _moving_average(pad(inv_r), ma_window), lw=2.2, label="invalid_rate")
+        ax.plot(x, _moving_average(pad(cap_r), ma_window), lw=2.2, label="capacity_reject_rate")
+        ax.plot(x, _moving_average(pad(cfl_r), ma_window), lw=2.2, label="conflict_drop_rate")
+
+        ax.set_ylim(bottom=0.0)
+        ax.set_title(f"{title}: Action Quality Rates (MA)", fontweight="bold")
+        ax.set_ylabel("Rate")
+        ax.grid(alpha=0.25)
+        ax.legend(fontsize=9)
+
+    axes[1].set_xlabel("Episode", fontweight="bold")
+    _save_fig(fig, out_png)
+
+
+def plot_mask_pressure_noop_debug(det_data, stoch_data, out_png, ma_window=5):
+    fig, axes = plt.subplots(2, 1, figsize=(14, 8), facecolor="white")
+
+    for ax, data, title, color in [
+        (axes[0], det_data, "Deterministic", "#2980b9"),
+        (axes[1], stoch_data, "Stochastic", "#27ae60"),
+    ]:
+        if not data:
+            ax.set_title(f"{title}: no data")
+            continue
+
+        maskz = _safe_series(data, "ep_mask_zero_count")
+        noop = _safe_series(data, "noop_fractions")
+        n = max(maskz.size, noop.size)
+        if n == 0:
+            ax.set_title(f"{title}: mask/noop logs not found")
+            continue
+
+        x = np.arange(1, n + 1)
+
+        def pad(a):
+            if a.size == n:
+                return a
+            b = np.zeros(n, dtype=float)
+            b[:min(n, a.size)] = a[:min(n, a.size)]
+            return b
+
+        m = _moving_average(pad(maskz), ma_window)
+        npf = _moving_average(pad(noop), ma_window)
+
+        ax2 = ax.twinx()
+        l1 = ax.plot(x, m, lw=2.2, color="#8e44ad", label="mask_zero_count")
+        l2 = ax2.plot(x, npf, lw=2.2, color="#16a085", label="noop_fraction")
+
+        ax.set_title(f"{title}: Mask Pressure & NOOP", fontweight="bold")
+        ax.set_ylabel("Mask zero count", color="#8e44ad")
+        ax2.set_ylabel("NOOP fraction", color="#16a085")
+        ax.grid(alpha=0.25)
+
+        lines = l1 + l2
+        labels = [ln.get_label() for ln in lines]
+        ax.legend(lines, labels, fontsize=9, loc="best")
+
+    axes[1].set_xlabel("Episode", fontweight="bold")
+    _save_fig(fig, out_png)
+
+
+def plot_debug_summary_table(det_data, stoch_data, out_png):
+    def extract(d):
+        st = (d or {}).get("stats", {})
+        return {
+            "invalid_rate": float(st.get("invalid_action_rate", 0.0)),
+            "capacity_reject_rate": float(st.get("capacity_reject_rate", 0.0)),
+            "conflict_drop_rate": float(st.get("conflict_drop_rate", 0.0)),
+            "noop_frac_mean": float(st.get("noop_frac_mean", 0.0)),
+            "mask_zero_mean": float(st.get("mask_zero_mean", 0.0)),
+            "r_comp_mean": float(st.get("r_comp_mean", 0.0)),
+            "r_wait_mean": float(st.get("r_wait_mean", 0.0)),
+            "r_deadline_mean": float(st.get("r_deadline_mean", 0.0)),
+            "r_obsolete_mean": float(st.get("r_obsolete_mean", 0.0)),
+        }
+
+    det = extract(det_data)
+    sto = extract(stoch_data)
+
+    cols = ["Metric", "Deterministic", "Stochastic"]
+    rows = []
+    for k in det.keys():
+        rows.append([k, f"{det[k]:.4f}", f"{sto[k]:.4f}"])
+
+    fig, ax = plt.subplots(figsize=(9, 6), facecolor="white")
+    ax.axis("off")
+    table = ax.table(cellText=rows, colLabels=cols, cellLoc="center", loc="center")
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.1, 1.6)
+
+    for i in range(len(cols)):
+        table[(0, i)].set_facecolor("#34495e")
+        table[(0, i)].set_text_props(weight="bold", color="white")
+
+    ax.set_title("Debug Summary Metrics", fontsize=14, fontweight="bold", pad=16)
+    _save_fig(fig, out_png)
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -764,7 +997,34 @@ def main() -> None:
                           output_dir / "10_training_cumulative_reward.png")
     plot_training_vs_eval_reward(monitor_data, det_data, stoch_data,
                                 output_dir / "11_training_vs_eval.png")
-
+    plot_noop_and_action_diagnostics(det_data, stoch_data, output_dir / "12_noop_and_action_diagnostic.png")    # Debug plots from eval_ppo extended fields
+    print("Debug Plots:")
+    plot_reward_components_debug(
+        det_data, stoch_data, output_dir / "13_reward_components.png", ma_window=args.ma_window
+    )
+    plot_action_quality_rates_debug(
+        det_data, stoch_data, output_dir / "14_action_quality_rates.png", ma_window=args.ma_window
+    )
+    plot_mask_pressure_noop_debug(
+        det_data, stoch_data, output_dir / "15_mask_pressure_noop.png", ma_window=args.ma_window
+    )
+    plot_debug_summary_table(
+        det_data, stoch_data, output_dir / "16_debug_summary_table.png"
+    )
+        # Debug plots from eval_ppo extended fields
+    print("Debug Plots:")
+    plot_reward_components_debug(
+        det_data, stoch_data, output_dir / "13_reward_components.png", ma_window=args.ma_window
+    )
+    plot_action_quality_rates_debug(
+        det_data, stoch_data, output_dir / "14_action_quality_rates.png", ma_window=args.ma_window
+    )
+    plot_mask_pressure_noop_debug(
+        det_data, stoch_data, output_dir / "15_mask_pressure_noop.png", ma_window=args.ma_window
+    )
+    plot_debug_summary_table(
+        det_data, stoch_data, output_dir / "16_debug_summary_table.png"
+    )
     print(f"generated 11 plots in {output_dir}\n")
 
 

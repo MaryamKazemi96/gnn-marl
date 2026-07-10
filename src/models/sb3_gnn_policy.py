@@ -294,6 +294,23 @@ class RTGNNPolicy(ActorCriticPolicy):
 
         logits_k, values = self._build_batch_outputs(obs_b)      # [B,R,K], [B,1]
         cand_mask = obs_b["cand_mask"]                            # [B,R,K]
+
+        #------------debug for candidate mask
+        # if not hasattr(self, "_mask_debug"):
+        #     self._mask_debug = 0
+
+        # self._mask_debug += 1
+
+        # if self._mask_debug % 200 == 0:
+        #     print("\nCandidate mask")
+        # print(cand_mask[0])
+
+
+        # print(
+        #     "valid candidates per robot:",
+        #     cand_mask[0].sum(dim=-1)
+        # )
+        #------------debug for candidate mask---------------
         logits_full, mask_full = self._append_noop_and_mask(logits_k, cand_mask)
         logits_full = logits_full.masked_fill(~mask_full, -1e9)
 
@@ -320,10 +337,28 @@ class RTGNNPolicy(ActorCriticPolicy):
         assert obs_b is not None
 
         logits_k, values = self._build_batch_outputs(obs_b)
+        #----debug for actor weights--------------
+        # if not hasattr(self, "_debug_counter"):
+        #     self._debug_counter = 0
+
+        # self._debug_counter += 1
+
+        # if self._debug_counter % 200 == 0:
+        #     print("\n===== ACTOR DEBUG =====")
+        #     print("actor_head weight norm:",
+        #         self.gnn_ac.actor_head.weight.norm().item())
+        #     print("actor_head bias:",
+        #         self.gnn_ac.actor_head.bias.data.cpu().numpy())
+        #----------------------
         cand_mask = obs_b["cand_mask"]
         logits_full, mask_full = self._append_noop_and_mask(logits_k, cand_mask)
         logits_full = logits_full.masked_fill(~mask_full, -1e9)
-
+        #-------------debug for actor weights--------------
+        # print(
+        #     "logits:",
+        #     logits_full[0, 0].detach().cpu().numpy()
+        # )
+        #-------------debug for actor weights--------------
         B = logits_full.shape[0]
         actions = actions.reshape(B, self.R)
         active  = mask_full[..., :self.K].any(dim=-1)

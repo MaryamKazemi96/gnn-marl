@@ -426,6 +426,14 @@ class EgoActorCritic(nn.Module):
         actor_cand_idx = cand_loc_idx_full if self.use_two_hop_actor else cand_loc_idx
         
         h_a, batch_a = self.enc_actor.encode_graphs(actor_x_list, actor_ei_list, actor_ea_list)
+
+        #--------debugging print statements--------
+        x0 = actor_x_list[0]
+
+        # print("\nNode feature std:", x0.std(dim=0).mean().item())
+        # print("First 5 nodes:")
+        # print(x0[:5])
+        #*-------debugging print statements--------
         h_a = self.actor_norm(h_a)
         
         logits_list: List[torch.Tensor] = []
@@ -433,11 +441,43 @@ class EgoActorCritic(nn.Module):
             mask_i = (batch_a.batch == i)
             h_i = h_a[mask_i]  # [n_i, H]
             cand_i = actor_cand_idx[i]  # [k_i]
-            
+            #-----debugging print statements-----
+
+            # print(
+            #     f"Robot {i}: "
+            #     f"h_i.shape={tuple(h_i.shape)} "
+            #     f"cand={cand_i.tolist()}"
+            # )
+                        
+
+            if cand_i.numel() > 0:
+                assert cand_i.max() < h_i.shape[0], (
+                    f"*****************************Robot {i}: candidate index out of bounds************************* "
+                    f"{cand_i.max()} >= {h_i.shape[0]}"
+                )
+
+                assert cand_i.min() >= 0
+            #------------------------------------
             if cand_i.numel() > 0 and h_i.numel() > 0:
                 h_t = h_i[cand_i]  # [k_i, H] (embeddings for candidate tasks)
+
+                #----debugging print statements-----
+                # if torch.rand(()) < 0.001:
+                #     print("\nEmbedding std:", h_t.std(dim=0).mean().item())
+                #     print("Embedding norm:", h_t.norm(dim=1))
+                #------------------------------------
                 base_logits = self.actor_head(h_t).squeeze(-1)  # [k_i]
-                
+                #-----debugging print statements-----
+                # print("raw actor logits:", base_logits.detach().cpu())
+                # print(
+                #     f"Robot {i} "
+                #     f"nodes={h_i.shape[0]} "
+                #     f"candidates={cand_i.numel()} "
+                #     f"indices={cand_i.tolist()}"
+                # )
+
+                # print(base_logits.detach().cpu())
+                #------------------------------------
                 if self.use_competitor_fusion:
                     # Apply competitor correction (Architecture 3.2)
                     z_t, ind_t, comp_stats = self._compute_comp_context(
@@ -466,7 +506,10 @@ class EgoActorCritic(nn.Module):
             logits_list.append(li)
         
         logits = torch.stack(logits_list, dim=0)  # [R, K_max]
-        
+        #---debugging print statements-----
+        # print("\nImmediately after stack:")
+        # print(logits[0])
+        #-----------------
         # === Critic graph ===
         critic_x_list = x_list_full if self.use_two_hop_critic else x_list
         critic_ei_list = ei_list_full if self.use_two_hop_critic else ei_list
@@ -489,11 +532,15 @@ class EgoActorCritic(nn.Module):
         # Aggregate over robots
         if self.critic_aggregation == "per_robot":
             v = self.critic_head(E).squeeze(-1)  # [R]
+            # for r in range(R):
+            #     print(f"logits[{r}] =", logits[r])
             return logits, v
         
         elif self.critic_aggregation == "joint_mean":
             g = E.mean(dim=0, keepdim=True)  # [1, H]
             v = self.critic_head(g).squeeze()  # scalar
+            # for r in range(R):
+            #     print(f"logits[{r}] =", logits[r])
             return logits, v
         
         elif self.critic_aggregation == "joint_attn":
@@ -501,6 +548,8 @@ class EgoActorCritic(nn.Module):
             w = torch.softmax(a.squeeze(-1), dim=0).unsqueeze(-1)  # [R, 1]
             g = (w * E).sum(dim=0, keepdim=True)  # [1, H]
             v = self.critic_head(g).squeeze()  # scalar
+            # for r in range(R):
+            #     print(f"logits[{r}] =", logits[r])
             return logits, v
         
         else:

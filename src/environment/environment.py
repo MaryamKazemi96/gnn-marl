@@ -1,3 +1,959 @@
+# """
+# Comprehensive multi-agent task allocation environment with full simulator logic.
+
+# Features:
+# - Robot movement & navigation via A* path planning
+# - Task pickup and dropoff handling
+# - Capacity management
+# - Deadline tracking and obsolescence
+# - Reward computation with multiple components
+# - GNN observation building
+# """
+# import gymnasium as gym
+# import numpy as np
+# from typing import Dict, Any, Tuple, Optional, List
+# from pathlib import Path
+# import sys
+# import yaml
+# from PIL import Image
+# import torch as th
+# sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+# from src.utils.ego_graph_builder import build_padded_ego_batch
+# from src.utils.feature_fn import make_feature_fn, compute_feature_dim
+# from utils import utils as ut
+
+
+# # =============================================================================
+# # Planner — A* path planning with cached obstacle grid
+# # =============================================================================
+
+# class Planner:
+#     """
+#     A* path planner over the ATC obstacle grid.
+
+#     The obstacle grid is built once from the map image and cached on the
+#     instance so that every call to get_plan() / is_point_valid() reuses the
+#     same array instead of re-sampling the PNG pixel-by-pixel each time.
+#     """
+
+#     def __init__(self):
+#         root_path   = Path(__file__).resolve().parent.parent.parent / "env"
+#         config_path = root_path / "ATC_wed.yaml"
+#         with open(config_path, "r") as fh:
+#             params = yaml.safe_load(fh)
+
+#         map_path = root_path / params["map_filename"]
+#         self.map_img           = Image.open(map_path).convert("L")
+#         self.map_resolution    = params["map_resolution"]
+#         self.Planning_resolution = params["Planning_resolution"]
+#         self.threshold         = params["obstacle_threshold"]
+#         self.origin_x          = params["origin_x"]
+#         self.origin_y          = params["origin_y"]
+#         self.average_velocity  = params["average_velocity"]
+
+#         # Cache the obstacle grid once — rebuilding it on every call was O(W*H)
+#         self._obstacle_grid: Optional[np.ndarray] = None
+
+#     def get_obstacle_grid(self) -> np.ndarray:
+#         """Return cached obstacle grid, building it on first call."""
+#         if self._obstacle_grid is not None:
+#             return self._obstacle_grid
+
+#         img_w, img_h = self.map_img.size
+#         scale        = self.map_resolution / self.Planning_resolution
+#         grid_height  = int(img_h * scale)
+#         grid_width   = int(img_w * scale)
+#         grid         = np.zeros((grid_height, grid_width), dtype=np.uint8)
+
+#         for row in range(grid_height):
+#             for col in range(grid_width):
+#                 px = int((col + 0.5) * img_w / grid_width)
+#                 py = int((row + 0.5) * img_h / grid_height)
+#                 if self.map_img.getpixel((px, py)) < (self.threshold * 255):
+#                     grid[row, col] = 1
+
+#         self._obstacle_grid = grid
+#         return grid
+
+#     def is_point_valid(self, point: Tuple[int, int]) -> bool:
+#         grid = self.get_obstacle_grid()
+#         h, w = point
+#         if 0 <= h < grid.shape[0] and 0 <= w < grid.shape[1]:
+#             return grid[h, w] == 0
+#         return False
+
+#     def get_plan(self, start: Tuple[int, int], end: Tuple[int, int]):
+#         """Return (found: bool, path: list[(row,col)]) via A*."""
+#         grid = self.get_obstacle_grid()
+#         return ut.astar(grid, start, end)
+
+
+# # =============================================================================
+# # MultiAgentTaskEnv
+# # =============================================================================
+
+# class MultiAgentTaskEnv(gym.Env):
+#     """
+#     Multi-agent task allocation environment.
+
+#     Coordinate system
+#     -----------------
+#     All positions (robot x/y, task pickup/dropoff) are stored as GRID INDICES
+#     (col, row) corresponding to the planning grid defined in ATC_wed.yaml
+#     with Planning_resolution=1.  movement_speed=1 therefore means 1 grid cell
+#     per simulation tick.  The A* planner also operates in (row, col) grid
+#     index space, so the conversion is:
+
+#         planner_start = (int(robot["y"]), int(robot["x"]))   # (row, col)
+#         planner_goal  = (int(target_y),  int(target_x))
+
+#     A* paths are stored as lists of (row, col) tuples; the robot follows them
+#     one cell at a time.
+
+#     Episode semantics
+#     -----------------
+#     One episode covers ALL task batches.  Tasks are released gradually as
+#     current_time reaches each batch's release_time.  The episode terminates
+#     naturally when every task from every batch has been either completed or
+#     made obsolete and all robots are idle.  It is truncated if current_step
+#     reaches max_steps.
+#     """
+
+#     def __init__(
+#         self,
+#         agents: np.ndarray = None,
+#         tasks_batches: list = None,
+#         agents_cont_coord_array: np.ndarray = None,
+#         task_cont_coord_array: np.ndarray = None,
+#         use_xy_pickup: bool = False,
+#         normalize_features: bool = True,
+#         use_node_type: bool = True,
+#         use_ego_robot: bool = True,
+#         use_edge_rt: bool = False,
+#         edge_features=None,
+#         N_max: int = 15,
+#         E_max: int = 50,
+#         K_max: int = 5,
+#         max_robot_capacity: int = 2,
+#         max_wait_delay_s: float = 600.0,
+#         max_travel_delay_s: float = 3600.0,
+#         max_steps: int = 2000,
+#         two_hop: bool = False,
+#         two_hop_directed: bool = False,
+#         vicinity_m: float = 100.0,
+#         movement_speed: float = 1.0,
+#         decision_interval: int = 8,
+#         radius: int = 100,
+#         feature_size: int = 9,
+#         use_true_id: bool = False,
+#         reward_mode: str = "new",
+#     ):
+#         super().__init__()
+
+#         if agents is not None and tasks_batches is not None:
+#             self.init_mode    = "new"
+#             self.agents_data  = agents
+#             self.tasks_batches = tasks_batches
+#             self.num_robots   = len(agents)
+#             # Planner is needed in new mode too (for A* path following).
+#             self.planner      = Planner()
+#         elif agents_cont_coord_array is not None and task_cont_coord_array is not None:
+#             self.init_mode                  = "old"
+#             self.agents_cont_coord_array    = agents_cont_coord_array
+#             self.task_cont_coord_array      = task_cont_coord_array
+#             self.num_robots                 = len(agents_cont_coord_array)
+#             self.radius                     = radius
+#             self.feature_size               = feature_size
+#             self.use_true_id                = use_true_id
+#             self.reward_mode                = reward_mode
+#             self.planner                    = Planner()
+#         else:
+#             raise ValueError(
+#                 "Must provide either (agents, tasks_batches) or "
+#                 "(agents_cont_coord_array, task_cont_coord_array)"
+#             )
+
+#         self.N_max              = N_max
+#         self.E_max              = E_max
+#         self.K_max              = K_max
+#         self.max_robot_capacity = max_robot_capacity
+#         self.vicinity_m         = vicinity_m
+#         self.two_hop            = two_hop
+#         self.two_hop_directed   = two_hop_directed
+#         self.max_steps          = max_steps
+#         self.movement_speed     = movement_speed
+#         self.decision_interval  = decision_interval
+#         self.max_wait_delay_s   = max_wait_delay_s
+#         self.max_travel_delay_s = max_travel_delay_s
+
+#         self.robots       = {}
+#         self.tasks        = {}
+#         self.current_time = 0.0
+#         self.current_step = 0
+#         # Total tasks across ALL batches — used by _check_episode_done.
+#         self.total_task_count = 0
+
+#         self.episode_completed_count = 0
+#         self.episode_obsolete_count  = 0
+#         self.episode_pickup_count    = 0
+#         self.episode_dropoff_count   = 0
+#         self._prev_completed_count   = 0
+#         self._prev_obsolete_count    = 0
+#         self._prev_pickup_count      = 0
+#         self._prev_dropoff_count     = 0
+
+#         if self.init_mode == "new":
+#             self.max_position = max(
+#                 np.max(agents[:, 1]),
+#                 np.max(agents[:, 2]),
+#             )
+#         else:
+#             self.max_position = 100.0
+
+#         self.F = compute_feature_dim(
+#             use_xy_pickup=use_xy_pickup,
+#             use_node_type=use_node_type,
+#             use_edge_rt=use_edge_rt,
+#             use_ego_robot=use_ego_robot,
+#         )
+
+#         self.feature_fn = make_feature_fn(
+#             env_state=self,
+#             use_xy_pickup=use_xy_pickup,
+#             normalize_features=normalize_features,
+#             use_node_type=use_node_type,
+#             use_edge_rt=use_edge_rt,
+#             edge_features=edge_features or [],
+#             use_ego_robot=use_ego_robot,
+#             max_position=self.max_position,
+#             max_robot_capacity=max_robot_capacity,
+#             max_wait_delay_s=max_wait_delay_s,
+#             max_travel_delay_s=max_travel_delay_s,
+#             max_steps=max_steps,
+#         )
+
+#         if use_edge_rt:
+#             self.edge_features  = edge_features or ["dx", "dy", "eta"]
+#             self.edge_feat_dim  = len(self.edge_features)
+#         else:
+#             self.edge_features  = []
+#             self.edge_feat_dim  = 0
+
+#         self.observation_space = gym.spaces.Dict({
+#             "x": gym.spaces.Box(
+#                 low=-np.inf, high=np.inf,
+#                 shape=(self.num_robots, N_max, self.F),
+#                 dtype=np.float32,
+#             ),
+#             "node_mask": gym.spaces.Box(
+#                 low=0, high=1,
+#                 shape=(self.num_robots, N_max),
+#                 dtype=np.uint8,
+#             ),
+#             "edge_index": gym.spaces.Box(
+#                 low=0, high=N_max,
+#                 shape=(self.num_robots, 2, E_max),
+#                 dtype=np.int64,
+#             ),
+#             "edge_mask": gym.spaces.Box(
+#                 low=0, high=1,
+#                 shape=(self.num_robots, E_max),
+#                 dtype=np.uint8,
+#             ),
+#             "cand_idx": gym.spaces.Box(
+#                 low=0, high=N_max,
+#                 shape=(self.num_robots, K_max),
+#                 dtype=np.int64,
+#             ),
+#             "cand_mask": gym.spaces.Box(
+#                 low=0, high=1,
+#                 shape=(self.num_robots, K_max),
+#                 dtype=np.uint8,
+#             ),
+#         })
+
+#         if self.edge_feat_dim > 0:
+#             self.observation_space.spaces["edge_attr"] = gym.spaces.Box(
+#                 low=-np.inf, high=np.inf,
+#                 shape=(self.num_robots, E_max, self.edge_feat_dim),
+#                 dtype=np.float32,
+#             )
+
+#         self.action_space          = gym.spaces.MultiDiscrete([K_max + 1] * self.num_robots)
+#         self._noop_index           = K_max
+#         self._last_cand_task_ids   = [[] for _ in range(self.num_robots)]
+
+#     # =========================================================================
+#     # RESET
+#     # =========================================================================
+
+#     def reset(self, seed=None):
+#         """Reset environment for a new episode covering ALL task batches."""
+#         super().reset(seed=seed)
+
+#         self.current_time            = 0.0
+#         self.current_step            = 0
+#         self.episode_completed_count = 0
+#         self.episode_obsolete_count  = 0
+#         self.episode_pickup_count    = 0
+#         self.episode_dropoff_count   = 0
+#         self._prev_completed_count   = 0
+#         self._prev_obsolete_count    = 0
+#         self._prev_pickup_count      = 0
+#         self._prev_dropoff_count     = 0
+
+#         if self.init_mode == "new":
+#             self._reset_new_mode()
+#         else:
+#             self._reset_old_mode()
+
+#         obs = self._build_observation()
+#         return obs, {"action_mask": self.action_mask()}
+
+#     def _reset_new_mode(self):
+#         """
+#         Initialise robots at their starting positions and seed the task pool.
+
+#         Every episode uses ALL batches: tasks are NOT loaded upfront but are
+#         injected gradually by _release_pending_tasks() as current_time reaches
+#         each batch's release_time.  Batch 0 has release_time=0 so those tasks
+#         are available immediately; later batches appear at t=15, 30, …
+#         """
+#         # ── Robots ────────────────────────────────────────────────────────────
+#         self.robots = {}
+#         for agent in self.agents_data:
+#             robot_id = str(int(agent[0]))
+#             self.robots[robot_id] = {
+#                 "id":               robot_id,
+#                 "x":                float(agent[1]),   # grid col index
+#                 "y":                float(agent[2]),   # grid row index
+#                 "max_capacity":     self.max_robot_capacity,
+#                 "current_capacity": 0,                 # tasks physically onboard
+#                 "assigned_tasks":   [],                # queue: assigned but not current
+#                 "current_task":     None,              # task currently being executed
+#                 "task_phase":       None,              # "pickup" | "travel_to_dropoff"
+#                 "target_location":  None,              # (x, y) grid coords of next waypoint
+#                 "path":             [],                # A* path: list of (row, col) cells
+#                 "just_picked_up_task": None,           # set at pickup for reward shaping
+#             }
+
+#         # ── Tasks ─────────────────────────────────────────────────────────────
+#         # Precompute total task count once per episode for _check_episode_done.
+#         self.total_task_count = sum(len(b) for b in self.tasks_batches)
+#         self.tasks = {}
+#         # Seed tasks whose release_time <= 0 (i.e. batch 0 with release_time=0).
+#         self._release_pending_tasks()
+
+#     def _reset_old_mode(self):
+#         """Reset for legacy mode (not used in current training)."""
+#         pass
+
+#     # =========================================================================
+#     # TASK RELEASE
+#     # =========================================================================
+
+#     def _release_pending_tasks(self):
+#         """
+#         Inject tasks from ALL batches whose release_time <= current_time.
+
+#         Called once in reset() (seeds t=0 tasks) and once per simulation tick
+#         inside step() so later batches enter the pool at the right moment.
+#         """
+#         for batch in self.tasks_batches:
+#             for task_data in batch:
+#                 task_id = str(int(task_data[0]))
+#                 if task_id in self.tasks:
+#                     continue
+#                 if float(task_data[5]) <= self.current_time:
+#                     self.tasks[task_id] = {
+#                         "id":              task_id,
+#                         "pickup_x":        float(task_data[1]),
+#                         "pickup_y":        float(task_data[2]),
+#                         "dropoff_x":       float(task_data[3]),
+#                         "dropoff_y":       float(task_data[4]),
+#                         "release_time":    float(task_data[5]),
+#                         "pickup_deadline": float(task_data[6]),
+#                         "est_travel_time": float(task_data[7]),
+#                         "dropoff_deadline":float(task_data[8]),
+#                         "is_assigned":     False,
+#                         "is_obsolete":     False,
+#                         "is_picked_up":    False,
+#                         "is_completed":    False,
+#                         "assigned_robot":  None,
+#                     }
+
+#     # =========================================================================
+#     # STEP
+#     # =========================================================================
+
+#     def step(self, actions):
+#         """
+#         Execute one policy step covering decision_interval simulation ticks.
+
+#         Tick order per simulation tick:
+#           1. Release newly-due tasks (_release_pending_tasks)
+#           2. Expire overdue tasks    (_update_task_deadlines)
+#           3. Move robots / pickup / dropoff (_execute_robot_movements_and_tasks)
+#           4. Advance time
+#           5. Compute incremental reward
+#         """
+#         # Outer decision tick (first of the decision_interval ticks)
+#         action_info = self._process_actions(actions)
+#         self._release_pending_tasks()
+#         self._update_task_deadlines()
+#         self._execute_robot_movements_and_tasks()
+#         self.current_time  += 1.0
+#         self.current_step  += 1
+#         reward = self._compute_rewards(action_info)
+#         # print(f"step {self.current_step}: action_info={action_info}, released tasks={[t['id'] for t in self.tasks.values() if t['release_time'] <= self.current_time]}")
+#         for _ in range(self.decision_interval - 1):
+#             if self.current_step >= self.max_steps:
+#                 break
+#             self._release_pending_tasks()
+#             self._update_task_deadlines()
+#             self._execute_robot_movements_and_tasks()
+#             self.current_time  += 1.0
+#             self.current_step  += 1
+#             reward += self._compute_rewards({})
+            
+#             if self._check_episode_done():
+#                 break
+
+#         terminated = self._check_episode_done()
+#         truncated  = self.current_step >= self.max_steps
+#         # print(f"Step {self.current_step}: reward={reward:.3f}, completed={self.episode_completed_count}, obsolete={self.episode_obsolete_count}, pickup={self.episode_pickup_count}, dropoff={self.episode_dropoff_count}, batches={len(self.tasks_batches)}, tasks={len(self.tasks)}")
+#         # print(f"Robots: {[{'id': r['id'], 'x': r['x'], 'y': r['y'], 'current_capacity': r['current_capacity'], 'assigned_tasks': r['assigned_tasks'], 'current_task': r['current_task'], 'task_phase': r['task_phase']} for r in self.robots.values()]}")
+#         obs  = self._build_observation()
+#         info = {
+#             "action_mask":     self.action_mask(),
+#             "step":            self.current_step,
+#             "time":            self.current_time,
+#             "completed_count": self.episode_completed_count,
+#             "obsolete_count":  self.episode_obsolete_count,
+#             "pickup_count":    self.episode_pickup_count,
+#             "dropoff_count":   self.episode_dropoff_count,
+#         }
+#         return obs, reward, terminated, truncated, info
+
+#     # =========================================================================
+#     # ACTION PROCESSING
+#     # =========================================================================
+
+#     def _process_actions(self, actions) -> Dict:
+#         """
+#         Map policy actions to task assignments with conflict resolution.
+
+#         Capacity accounting
+#         -------------------
+#         A robot's committed capacity = tasks physically onboard
+#         (current_capacity) + tasks queued but not yet started (assigned_tasks)
+#         + the task it is currently travelling to pick up (current_task when
+#         phase == "pickup").  This prevents over-assignment when a robot is
+#         already en-route to a pickup location but hasn't arrived yet.
+
+#         Conflict resolution: if two robots select the same task, the closer
+#         robot wins (greedy by ascending distance).
+#         """
+#         robot_ids = sorted(self.robots.keys())
+#         requests  = []
+
+#         for r_idx, action in enumerate(actions):
+#             if int(action) == self._noop_index:
+#                 continue
+#             if r_idx >= len(robot_ids):
+#                 break
+#             robot_id = robot_ids[r_idx]
+#             cands    = self._get_candidate_tasks(robot_id)
+#             # print(f"Robot {robot_id} candidates: {cands}, action={action}")
+#             # cands2 = self._last_cand_task_ids[r_idx]
+#             # print(f"Robot {robot_id} candidates: {cands2}, action={action}")
+#             if int(action) >= len(cands):
+#                 continue
+#             task_id = cands[int(action)]
+#             robot   = self.robots[robot_id]
+#             dist    = np.sqrt(
+#                 (robot["x"] - self.tasks[task_id]["pickup_x"]) ** 2 +
+#                 (robot["y"] - self.tasks[task_id]["pickup_y"]) ** 2
+#             )
+#             requests.append((dist, robot_id, task_id))
+
+#         # Closest robot wins any conflict on the same task
+#         requests.sort()
+#         assigned_this_step = set()
+#         action_info        = {}
+
+#         for _dist, robot_id, task_id in requests:
+#             if task_id in assigned_this_step:
+#                 continue  # another robot already claimed this task
+
+#             robot = self.robots[robot_id]
+#             task  = self.tasks.get(task_id)
+
+#             # Skip if task disappeared (obsoleted between obs and action)
+#             if task is None or task.get("is_assigned") or task.get("is_obsolete"):
+#                 continue
+
+#             # Total committed capacity:
+#             #   current_capacity  = physically onboard (picked up, not dropped off)
+#             #   len(assigned_tasks) = queued but not yet current_task
+#             #   +1 if current_task is in pickup phase (committed but not onboard yet)
+#             in_pickup_phase = (
+#                 robot["current_task"] is not None and
+#                 robot["task_phase"] == "pickup"
+#             )
+#             total_committed = (
+#                 robot["current_capacity"] +
+#                 len(robot["assigned_tasks"]) +
+#                 (1 if in_pickup_phase else 0)
+#             )
+
+#             if total_committed >= self.max_robot_capacity:
+#                 continue
+
+#             # Assign
+#             robot["assigned_tasks"].append(task_id)
+#             task["is_assigned"]    = True
+#             task["assigned_robot"] = robot_id
+#             assigned_this_step.add(task_id)
+#             action_info[robot_id] = {"assigned_task": task_id}
+
+#         return action_info
+
+#     # =========================================================================
+#     # CANDIDATE TASKS
+#     # =========================================================================
+
+#     def _get_candidate_tasks(self, robot_id) -> List[str]:
+#         """
+#         Return up to K_max available tasks within vicinity_m of the robot,
+#         sorted by ascending Euclidean distance to pickup location.
+#         """
+#         robot = self.robots.get(str(robot_id))
+#         if robot is None:
+#             return []
+
+#         candidates = []
+#         for task_id, task in self.tasks.items():
+#             if task.get("is_assigned") or task.get("is_completed") or task.get("is_obsolete"):
+#                 continue
+#             if task.get("release_time", 0) > self.current_time:
+#                 continue
+#             if task.get("pickup_deadline", float("inf")) <= self.current_time:
+#                 continue
+#             dist = np.sqrt(
+#                 (robot["x"] - task["pickup_x"]) ** 2 +
+#                 (robot["y"] - task["pickup_y"]) ** 2
+#             )
+#             if dist <= self.vicinity_m:
+#                 candidates.append((dist, task_id))
+
+#         candidates.sort()
+#         return [tid for _, tid in candidates[: self.K_max]]
+
+#     # =========================================================================
+#     # TASK LIFECYCLE — deadlines
+#     # =========================================================================
+
+#     def _update_task_deadlines(self):
+#         """
+#         Mark expired tasks obsolete and clean up the owning robot's state.
+
+#         Capacity notes:
+#           - If the task was already picked up (is_picked_up=True), it
+#             occupies a slot in current_capacity → decrement.
+#           - If it was only assigned (not yet picked up), it is still in
+#             assigned_tasks or is current_task in pickup phase → no
+#             current_capacity decrement, but must be removed from the queue.
+#         """
+#         for task_id, task in list(self.tasks.items()):
+#             if task.get("is_obsolete") or task.get("is_completed"):
+#                 continue
+
+#             # Determine if expired
+#             if not task.get("is_picked_up"):
+#                 # print(f"Checking task {task_id} for expiration: pickup_deadline={task.get('pickup_deadline')}, current_time={self.current_time}")
+#                 expired = task.get("pickup_deadline", float("inf")) <= self.current_time
+#             else:
+#                 # print(f"Checking task {task_id} for expiration: dropoff_deadline={task.get('dropoff_deadline')}, current_time={self.current_time}")
+#                 expired = task.get("dropoff_deadline", float("inf")) <= self.current_time
+
+#             if not expired:
+#                 continue
+
+#             task["is_obsolete"]         = True
+#             self.episode_obsolete_count += 1
+
+#             # Clean up the assigned robot
+#             assigned_id = task.get("assigned_robot")
+#             if assigned_id and assigned_id in self.robots:
+#                 robot = self.robots[assigned_id]
+
+#                 # Decrement onboard count only if physically picked up
+#                 if task.get("is_picked_up"):
+#                     robot["current_capacity"] = max(0, robot["current_capacity"] - 1)
+
+#                 # Remove from queue if present
+#                 if task_id in robot["assigned_tasks"]:
+#                     robot["assigned_tasks"].remove(task_id)
+
+#                 # Clear current_task if robot was executing this task
+#                 if robot["current_task"] == task_id:
+#                     robot["current_task"]     = None
+#                     robot["task_phase"]       = None
+#                     robot["target_location"]  = None
+#                     robot["path"]             = []   # discard stale A* path
+
+#     # =========================================================================
+#     # ROBOT MOVEMENT — A* path following
+#     # =========================================================================
+
+#     def _execute_robot_movements_and_tasks(self):
+#         """
+#         Advance robot state machines: dequeue tasks, follow A* path,
+#         execute pickup / dropoff on arrival.
+#         """
+#         for robot_id, robot in self.robots.items():
+#             # Dequeue next task if robot has nothing to do
+#             if robot["current_task"] is None and robot["assigned_tasks"]:
+#                 next_task_id = robot["assigned_tasks"].pop(0)
+#                 task = self.tasks.get(next_task_id)
+#                 if task is None or task.get("is_obsolete"):
+#                     continue  # task expired while queued
+#                 robot["current_task"]    = next_task_id
+#                 robot["task_phase"]      = "pickup"
+#                 robot["target_location"] = (task["pickup_x"], task["pickup_y"])
+#                 robot["path"]            = []   # will be planned on first movement
+
+#             if robot["current_task"] is not None:
+#                 self._move_robot_toward_target(robot_id)
+
+#     def _move_robot_toward_target(self, robot_id: str):
+#         """
+#         Move robot one step along its A* path toward the current target.
+
+#         Path planning
+#         -------------
+#         On the first call after a new target is set (robot["path"] == []),
+#         A* is invoked to compute a collision-free path from the robot's
+#         current grid cell to the target cell.  The resulting list of
+#         (row, col) waypoints is stored on the robot and consumed one cell
+#         per simulation tick.
+
+#         If A* cannot find a path (obstacle-blocked), the robot falls back
+#         to straight-line movement so it is never permanently stuck.
+
+#         Coordinate conventions
+#         ----------------------
+#         robot["x"] = grid column   robot["y"] = grid row
+#         A* takes (row, col) = (int(y), int(x))
+#         After following a waypoint the robot position is updated to the
+#         exact (col, row) of that waypoint (integer grid cell).
+#         """
+#         robot    = self.robots[robot_id]
+#         target_x, target_y = robot["target_location"]
+
+#         # ── Plan path if we don't have one ────────────────────────────────────
+#         if not robot["path"]:
+#             start = (int(round(robot["y"])), int(round(robot["x"])))
+#             goal  = (int(round(target_y)),   int(round(target_x)))
+
+#             if start == goal:
+#                 # Already at target — let the arrival logic below handle it
+#                 pass
+#             else:
+#                 found, path = self.planner.get_plan(start, goal)
+#                 if found and path and len(path) > 1:
+#                     # path[0] is the start cell; skip it (robot is already there)
+#                     robot["path"] = list(path[1:])
+#                 else:
+#                     # A* failed (e.g. start/goal in obstacle) — straight-line fallback
+#                     robot["path"] = []
+
+#         # ── Follow next waypoint ───────────────────────────────────────────────
+#         if robot["path"]:
+#             next_row, next_col = robot["path"][0]
+
+#             # Move toward the next cell by up to movement_speed units
+#             dx   = float(next_col) - robot["x"]
+#             dy   = float(next_row) - robot["y"]
+#             dist = np.sqrt(dx * dx + dy * dy)
+
+#             if dist <= self.movement_speed:
+#                 # Snap to the waypoint exactly and consume it
+#                 robot["x"] = float(next_col)
+#                 robot["y"] = float(next_row)
+#                 robot["path"].pop(0)
+#             else:
+#                 robot["x"] += (dx / dist) * self.movement_speed
+#                 robot["y"] += (dy / dist) * self.movement_speed
+#             return
+
+#         # ── No path remaining: check if we have arrived ───────────────────────
+#         # (handles both the "path exhausted" and "start==goal" cases)
+#         dx   = target_x - robot["x"]
+#         dy   = target_y - robot["y"]
+#         dist = np.sqrt(dx * dx + dy * dy)
+
+#         if dist > 0.5:
+#             # Path exhausted but not at target (A* fallback: straight-line nudge)
+#             move = min(self.movement_speed, dist)
+#             robot["x"] += (dx / dist) * move
+#             robot["y"] += (dy / dist) * move
+#             return
+
+#         # ── Arrival ───────────────────────────────────────────────────────────
+#         task_id = robot["current_task"]
+#         task    = self.tasks.get(task_id)
+#         if task is None:
+#             robot["current_task"]    = None
+#             robot["task_phase"]      = None
+#             robot["target_location"] = None
+#             robot["path"]            = []
+#             return
+
+#         if robot["task_phase"] == "pickup":
+#             robot["current_capacity"]  += 1
+#             task["is_picked_up"]        = True
+#             self.episode_pickup_count  += 1
+#             robot["just_picked_up_task"] = task_id      # used by reward shaping
+#             robot["task_phase"]         = "travel_to_dropoff"
+#             robot["target_location"]    = (task["dropoff_x"], task["dropoff_y"])
+#             robot["path"]               = []             # plan fresh for dropoff leg
+
+#         elif robot["task_phase"] == "travel_to_dropoff":
+#             robot["current_capacity"]    = max(0, robot["current_capacity"] - 1)
+#             task["is_completed"]         = True
+#             self.episode_dropoff_count  += 1
+#             self.episode_completed_count += 1
+#             robot["current_task"]        = None
+#             robot["task_phase"]          = None
+#             robot["target_location"]     = None
+#             robot["path"]                = []
+
+#     # =========================================================================
+#     # OBSERVATION
+#     # =========================================================================
+
+#     def _build_observation(self) -> Dict:
+#         """Build GNN observation using build_padded_ego_batch."""
+#         robot_ids = sorted(self.robots.keys())
+#         if len(robot_ids) < self.num_robots:
+#             robot_ids += [None] * (self.num_robots - len(robot_ids))
+#         robot_ids = robot_ids[: self.num_robots]
+
+#         candidate_lists = [
+#             self._get_candidate_tasks(rid) if rid is not None else []
+#             for rid in robot_ids
+#         ]
+
+#         obs_dict, cand_task_ids = build_padded_ego_batch(
+#             robots=robot_ids,
+#             robots_dict=self.robots,
+#             tasks=self.tasks,
+#             candidate_lists=candidate_lists,
+#             N_max=self.N_max,
+#             E_max=self.E_max,
+#             K_max=self.K_max,
+#             F=self.F,
+#             G=0,
+#             feature_fn=self.feature_fn,
+#             two_hop=self.two_hop,
+#             two_hop_directed=self.two_hop_directed,
+#             normalize_features=True,
+#             vicinity_m=self.vicinity_m,
+#             use_edge_rt=(self.edge_feat_dim > 0),
+#             edge_feat_dim=self.edge_feat_dim,
+#             edge_features=self.edge_features,
+#         )
+
+#         self._last_cand_task_ids = cand_task_ids
+#         return obs_dict
+
+#     # =========================================================================
+#     # REWARD
+#     # =========================================================================
+#     def _compute_rewards(self, action_info) -> float:
+#         robots = self.robots.values()
+
+#         W_COMP = 10.0
+#         W_WAIT = 1.5
+#         W_DEADLINE = 5.0
+#         W_TRAVEL = 2.0
+
+#         WAIT_CAP = self.max_wait_delay_s
+#         DEADLINE_CAP = self.max_travel_delay_s
+
+#         reward = 0.0
+
+#         # =========================================================
+#         # 1. PICKUP EVENTS (WAIT penalty + implicit progress signal)
+#         # =========================================================
+#         for r in robots:
+#             task_id = r.get("just_picked_up_task")
+#             if not task_id:
+#                 continue
+
+#             task = self.tasks.get(task_id)
+#             if task is None:
+#                 continue
+
+#             # wait time since release
+#             wait = max(0.0, self.current_time - task["release_time"])
+#             wait_pen = -min(wait, WAIT_CAP) / WAIT_CAP
+
+#             reward += W_WAIT * wait_pen
+
+#             # optional: store pickup time
+#             task["pickup_time"] = self.current_time
+
+#             r["just_picked_up_task"] = None
+
+#         # =========================================================
+#         # 2. DROPOFF EVENTS (MAIN REWARD SIGNAL)
+#         # =========================================================
+#         for task_id, task in self.tasks.items():
+#             if not task.get("is_completed"):
+#                 continue
+
+#             # ensure single counting
+#             if task.get("_rewarded"):
+#                 continue
+#             task["_rewarded"] = True
+
+#             rid = task.get("assigned_robot")
+#             if rid is None:
+#                 continue
+
+#             # completion reward
+#             reward += W_COMP
+
+#             # deadline quality (pickup + dropoff correctness)
+#             pickup_time = task.get("pickup_time", self.current_time)
+#             dropoff_time = task.get("dropoff_time", self.current_time)
+
+#             # pickup lateness
+#             if task.get("pickup_deadline") is not None:
+#                 late_p = max(0.0, pickup_time - task["pickup_deadline"])
+#                 reward += W_DEADLINE * (-min(late_p, DEADLINE_CAP) / DEADLINE_CAP)
+
+#             # dropoff lateness
+#             if task.get("dropoff_deadline") is not None:
+#                 late_d = max(0.0, dropoff_time - task["dropoff_deadline"])
+#                 reward += W_DEADLINE * (-min(late_d, DEADLINE_CAP) / DEADLINE_CAP)
+
+#             task["dropoff_time"] = self.current_time
+
+#         # =========================================================
+#         # 3. OBSOLETE TASK PENALTY (strong failure signal)
+#         # =========================================================
+#         for task_id, task in self.tasks.items():
+#             if not task.get("is_obsolete"):
+#                 continue
+
+#             if task.get("_obsolete_rewarded"):
+#                 continue
+#             task["_obsolete_rewarded"] = True
+
+#             rid = task.get("assigned_robot")
+#             if rid is None:
+#                 continue
+
+#             # stronger penalty than completion reward
+#             reward += -W_COMP * 0.5
+
+#             # additional deadline-based penalty
+#             late = max(0.0, self.current_time - task.get("pickup_deadline", self.current_time))
+#             reward += W_DEADLINE * (-min(late, DEADLINE_CAP) / DEADLINE_CAP)
+#         # print(f"Step {self.current_step}: reward={reward:.3f}, completed={self.episode_completed_count}, obsolete={self.episode_obsolete_count}, pickup={self.episode_pickup_count}, dropoff={self.episode_dropoff_count}")
+#         return float(reward)
+#     def _compute_rewardsold(self, action_info) -> float:
+#         """
+#         Shaped reward with incremental deltas:
+#           +W_COMP  per completed task
+#           -W_WAIT * (wait / WAIT_CAP)  per pickup (wait since release)
+#           -W_DEADLINE * 0.5  per obsolete task
+#         """
+#         new_complete = self.episode_completed_count - self._prev_completed_count
+#         new_obsolete = self.episode_obsolete_count  - self._prev_obsolete_count
+
+#         self._prev_completed_count = self.episode_completed_count
+#         self._prev_obsolete_count  = self.episode_obsolete_count
+#         self._prev_pickup_count    = self.episode_pickup_count
+#         self._prev_dropoff_count   = self.episode_dropoff_count
+
+#         W_COMP     = 10.0
+#         W_WAIT     = 1.5
+#         W_DEADLINE = 5.0
+#         WAIT_CAP   = max(1.0, float(self.max_wait_delay_s))
+
+#         reward = float(new_complete) * W_COMP
+
+#         # Wait penalty: assessed at moment of pickup
+#         for robot in self.robots.values():
+#             picked_id = robot.get("just_picked_up_task")
+#             if picked_id:
+#                 t = self.tasks.get(picked_id)
+#                 if t is not None:
+#                     wait_s  = max(0.0, self.current_time - t["release_time"])
+#                     reward += -(min(wait_s, WAIT_CAP) / WAIT_CAP) * W_WAIT
+#                 robot["just_picked_up_task"] = None
+#                 print(f"Robot {robot['id']} picked up task {picked_id} at time {self.current_time:.1f}, wait={wait_s:.1f}s, reward delta={-(min(wait_s, WAIT_CAP) / WAIT_CAP) * W_WAIT:.3f}")
+
+#         # Obsolescence penalty
+#         reward -= float(new_obsolete) * (W_DEADLINE)
+#         print(f"Step {self.current_step}: reward completed={new_complete * W_COMP}, obsolete={new_obsolete* (W_DEADLINE)} total reward={reward:.3f}")
+#         return reward
+
+#     # =========================================================================
+#     # TERMINATION
+#     # =========================================================================
+
+#     def _check_episode_done(self) -> bool:
+#         """
+#         The episode is done when:
+#           1. Every task from every batch has been released (injected into
+#              self.tasks) — meaning current_time has passed the last
+#              batch's release_time, AND
+#           2. Every released task is either completed or obsolete, AND
+#           3. All robots are idle (no current task and no queued tasks).
+#         """
+#         # Condition 1: all tasks released
+#         if len(self.tasks) < self.total_task_count:
+#             return False
+
+#         # Condition 2: no task still pending
+#         any_pending = any(
+#             not t.get("is_completed") and not t.get("is_obsolete")
+#             for t in self.tasks.values()
+#         )
+#         if any_pending:
+#             return False
+
+#         # Condition 3: robots idle
+#         robots_idle = all(
+#             len(r["assigned_tasks"]) == 0 and r["current_task"] is None
+#             for r in self.robots.values()
+#         )
+#         return robots_idle
+
+#     # =========================================================================
+#     # UTILITIES
+#     # =========================================================================
+
+#     def action_mask(self) -> np.ndarray:
+#         """Return valid action mask (R, K_max+1). NO-OP is always valid."""
+#         mask = np.zeros((self.num_robots, self.K_max + 1), dtype=np.uint8)
+#         for r in range(self.num_robots):
+#             for k in range(min(self.K_max, len(self._last_cand_task_ids[r]))):
+#                 if self._last_cand_task_ids[r][k] is not None:
+#                     mask[r, k] = 1
+#             mask[r, self._noop_index] = 1   # NO-OP always allowed
+#         return mask
+
+#     def close(self):
+#         pass
+
 """
 Comprehensive multi-agent task allocation environment with full simulator logic.
 
@@ -8,7 +964,14 @@ Features:
 - Deadline tracking and obsolescence
 - Reward computation with multiple components
 - GNN observation building
+
+Patched updates:
+- Added diagnostics for action validity/masking/reward components.
+- Action decoding now uses observation-time candidate snapshot (_last_cand_task_ids).
+- Dropoff time is set at dropoff event (before reward read).
+- If task is already picked up, it is NOT obsoleted on deadline; delivery continues and lateness is penalized in reward.
 """
+
 import gymnasium as gym
 import numpy as np
 from typing import Dict, Any, Tuple, Optional, List
@@ -17,6 +980,7 @@ import sys
 import yaml
 from PIL import Image
 import torch as th
+
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from src.utils.ego_graph_builder import build_padded_ego_batch
@@ -38,21 +1002,20 @@ class Planner:
     """
 
     def __init__(self):
-        root_path   = Path(__file__).resolve().parent.parent.parent / "env"
+        root_path = Path(__file__).resolve().parent.parent.parent / "env"
         config_path = root_path / "ATC_wed.yaml"
         with open(config_path, "r") as fh:
             params = yaml.safe_load(fh)
 
         map_path = root_path / params["map_filename"]
-        self.map_img           = Image.open(map_path).convert("L")
-        self.map_resolution    = params["map_resolution"]
+        self.map_img = Image.open(map_path).convert("L")
+        self.map_resolution = params["map_resolution"]
         self.Planning_resolution = params["Planning_resolution"]
-        self.threshold         = params["obstacle_threshold"]
-        self.origin_x          = params["origin_x"]
-        self.origin_y          = params["origin_y"]
-        self.average_velocity  = params["average_velocity"]
+        self.threshold = params["obstacle_threshold"]
+        self.origin_x = params["origin_x"]
+        self.origin_y = params["origin_y"]
+        self.average_velocity = params["average_velocity"]
 
-        # Cache the obstacle grid once — rebuilding it on every call was O(W*H)
         self._obstacle_grid: Optional[np.ndarray] = None
 
     def get_obstacle_grid(self) -> np.ndarray:
@@ -61,10 +1024,10 @@ class Planner:
             return self._obstacle_grid
 
         img_w, img_h = self.map_img.size
-        scale        = self.map_resolution / self.Planning_resolution
-        grid_height  = int(img_h * scale)
-        grid_width   = int(img_w * scale)
-        grid         = np.zeros((grid_height, grid_width), dtype=np.uint8)
+        scale = self.map_resolution / self.Planning_resolution
+        grid_height = int(img_h * scale)
+        grid_width = int(img_w * scale)
+        grid = np.zeros((grid_height, grid_width), dtype=np.uint8)
 
         for row in range(grid_height):
             for col in range(grid_width):
@@ -96,28 +1059,6 @@ class Planner:
 class MultiAgentTaskEnv(gym.Env):
     """
     Multi-agent task allocation environment.
-
-    Coordinate system
-    -----------------
-    All positions (robot x/y, task pickup/dropoff) are stored as GRID INDICES
-    (col, row) corresponding to the planning grid defined in ATC_wed.yaml
-    with Planning_resolution=1.  movement_speed=1 therefore means 1 grid cell
-    per simulation tick.  The A* planner also operates in (row, col) grid
-    index space, so the conversion is:
-
-        planner_start = (int(robot["y"]), int(robot["x"]))   # (row, col)
-        planner_goal  = (int(target_y),  int(target_x))
-
-    A* paths are stored as lists of (row, col) tuples; the robot follows them
-    one cell at a time.
-
-    Episode semantics
-    -----------------
-    One episode covers ALL task batches.  Tasks are released gradually as
-    current_time reaches each batch's release_time.  The episode terminates
-    naturally when every task from every batch has been either completed or
-    made obsolete and all robots are idle.  It is truncated if current_step
-    reaches max_steps.
     """
 
     def __init__(
@@ -148,66 +1089,87 @@ class MultiAgentTaskEnv(gym.Env):
         feature_size: int = 9,
         use_true_id: bool = False,
         reward_mode: str = "new",
+        capacity_method: str = "assigned"
     ):
         super().__init__()
 
         if agents is not None and tasks_batches is not None:
-            self.init_mode    = "new"
-            self.agents_data  = agents
+            self.init_mode = "new"
+            self.agents_data = agents
             self.tasks_batches = tasks_batches
-            self.num_robots   = len(agents)
-            # Planner is needed in new mode too (for A* path following).
-            self.planner      = Planner()
+            self.num_robots = len(agents)
+            self.planner = Planner()
         elif agents_cont_coord_array is not None and task_cont_coord_array is not None:
-            self.init_mode                  = "old"
-            self.agents_cont_coord_array    = agents_cont_coord_array
-            self.task_cont_coord_array      = task_cont_coord_array
-            self.num_robots                 = len(agents_cont_coord_array)
-            self.radius                     = radius
-            self.feature_size               = feature_size
-            self.use_true_id                = use_true_id
-            self.reward_mode                = reward_mode
-            self.planner                    = Planner()
+            self.init_mode = "old"
+            self.agents_cont_coord_array = agents_cont_coord_array
+            self.task_cont_coord_array = task_cont_coord_array
+            self.num_robots = len(agents_cont_coord_array)
+            self.radius = radius
+            self.feature_size = feature_size
+            self.use_true_id = use_true_id
+            self.reward_mode = reward_mode
+            self.planner = Planner()
         else:
             raise ValueError(
                 "Must provide either (agents, tasks_batches) or "
                 "(agents_cont_coord_array, task_cont_coord_array)"
             )
 
-        self.N_max              = N_max
-        self.E_max              = E_max
-        self.K_max              = K_max
+        self.N_max = N_max
+        self.E_max = E_max
+        self.K_max = K_max
         self.max_robot_capacity = max_robot_capacity
-        self.vicinity_m         = vicinity_m
-        self.two_hop            = two_hop
-        self.two_hop_directed   = two_hop_directed
-        self.max_steps          = max_steps
-        self.movement_speed     = movement_speed
-        self.decision_interval  = decision_interval
-        self.max_wait_delay_s   = max_wait_delay_s
+        self.vicinity_m = vicinity_m
+        self.two_hop = two_hop
+        self.two_hop_directed = two_hop_directed
+        self.max_steps = max_steps
+        self.movement_speed = movement_speed
+        self.decision_interval = decision_interval
+        self.max_wait_delay_s = max_wait_delay_s
         self.max_travel_delay_s = max_travel_delay_s
 
-        self.robots       = {}
-        self.tasks        = {}
+        self.robots = {}
+        self.tasks = {}
         self.current_time = 0.0
         self.current_step = 0
-        # Total tasks across ALL batches — used by _check_episode_done.
         self.total_task_count = 0
 
         self.episode_completed_count = 0
-        self.episode_obsolete_count  = 0
-        self.episode_pickup_count    = 0
-        self.episode_dropoff_count   = 0
-        self._prev_completed_count   = 0
-        self._prev_obsolete_count    = 0
-        self._prev_pickup_count      = 0
-        self._prev_dropoff_count     = 0
+        self.episode_obsolete_count = 0
+        self.episode_pickup_count = 0
+        self.episode_dropoff_count = 0
+        self._prev_completed_count = 0
+        self._prev_obsolete_count = 0
+        self._prev_pickup_count = 0
+        self._prev_dropoff_count = 0
+
+        # diagnostics (episode-level)
+        self.debug_invalid_action_count = 0
+        self.debug_total_action_count = 0
+        self.debug_valid_action_count = 0
+        self.debug_conflict_dropped_count = 0
+        self.debug_capacity_rejected_count = 0
+
+        # diagnostics (last-step)
+        self.debug_last_invalid_action_count = 0
+        self.debug_last_total_action_count = 0
+        self.debug_last_valid_action_count = 0
+        self.debug_last_conflict_dropped_count = 0
+        self.debug_last_capacity_rejected_count = 0
+        self.debug_last_mask_zero_count = 0
+
+        self.debug_last_r_comp = 0.0
+        self.debug_last_r_wait = 0.0
+        self.debug_last_r_deadline = 0.0
+        self.debug_last_r_obsolete = 0.0
+
+        self.debug_ep_r_comp = 0.0
+        self.debug_ep_r_wait = 0.0
+        self.debug_ep_r_deadline = 0.0
+        self.debug_ep_r_obsolete = 0.0
 
         if self.init_mode == "new":
-            self.max_position = max(
-                np.max(agents[:, 1]),
-                np.max(agents[:, 2]),
-            )
+            self.max_position = max(np.max(agents[:, 1]), np.max(agents[:, 2]))
         else:
             self.max_position = 100.0
 
@@ -234,74 +1196,75 @@ class MultiAgentTaskEnv(gym.Env):
         )
 
         if use_edge_rt:
-            self.edge_features  = edge_features or ["dx", "dy", "eta"]
-            self.edge_feat_dim  = len(self.edge_features)
+            self.edge_features = edge_features or ["dx", "dy", "eta"]
+            self.edge_feat_dim = len(self.edge_features)
         else:
-            self.edge_features  = []
-            self.edge_feat_dim  = 0
+            self.edge_features = []
+            self.edge_feat_dim = 0
 
         self.observation_space = gym.spaces.Dict({
-            "x": gym.spaces.Box(
-                low=-np.inf, high=np.inf,
-                shape=(self.num_robots, N_max, self.F),
-                dtype=np.float32,
-            ),
-            "node_mask": gym.spaces.Box(
-                low=0, high=1,
-                shape=(self.num_robots, N_max),
-                dtype=np.uint8,
-            ),
-            "edge_index": gym.spaces.Box(
-                low=0, high=N_max,
-                shape=(self.num_robots, 2, E_max),
-                dtype=np.int64,
-            ),
-            "edge_mask": gym.spaces.Box(
-                low=0, high=1,
-                shape=(self.num_robots, E_max),
-                dtype=np.uint8,
-            ),
-            "cand_idx": gym.spaces.Box(
-                low=0, high=N_max,
-                shape=(self.num_robots, K_max),
-                dtype=np.int64,
-            ),
-            "cand_mask": gym.spaces.Box(
-                low=0, high=1,
-                shape=(self.num_robots, K_max),
-                dtype=np.uint8,
-            ),
+            "x": gym.spaces.Box(low=-np.inf, high=np.inf, shape=(self.num_robots, N_max, self.F), dtype=np.float32),
+            "node_mask": gym.spaces.Box(low=0, high=1, shape=(self.num_robots, N_max), dtype=np.uint8),
+            "edge_index": gym.spaces.Box(low=0, high=N_max, shape=(self.num_robots, 2, E_max), dtype=np.int64),
+            "edge_mask": gym.spaces.Box(low=0, high=1, shape=(self.num_robots, E_max), dtype=np.uint8),
+            "cand_idx": gym.spaces.Box(low=0, high=N_max, shape=(self.num_robots, K_max), dtype=np.int64),
+            "cand_mask": gym.spaces.Box(low=0, high=1, shape=(self.num_robots, K_max), dtype=np.uint8),
         })
 
         if self.edge_feat_dim > 0:
             self.observation_space.spaces["edge_attr"] = gym.spaces.Box(
-                low=-np.inf, high=np.inf,
-                shape=(self.num_robots, E_max, self.edge_feat_dim),
-                dtype=np.float32,
+                low=-np.inf, high=np.inf, shape=(self.num_robots, E_max, self.edge_feat_dim), dtype=np.float32
             )
 
-        self.action_space          = gym.spaces.MultiDiscrete([K_max + 1] * self.num_robots)
-        self._noop_index           = K_max
-        self._last_cand_task_ids   = [[] for _ in range(self.num_robots)]
+        self.action_space = gym.spaces.MultiDiscrete([K_max + 1] * self.num_robots)
+        self._noop_index = K_max
+        self._last_cand_task_ids = [[] for _ in range(self.num_robots)]
 
+        self.capacity_method = capacity_method.lower()
+        if self.capacity_method not in ("assigned", "pickup"):
+            raise ValueError(
+                "capacity_method must be 'assigned' or 'pickup'"
+            )
     # =========================================================================
     # RESET
     # =========================================================================
 
-    def reset(self, seed=None):
-        """Reset environment for a new episode covering ALL task batches."""
+    def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        self.current_time            = 0.0
-        self.current_step            = 0
+        self.current_time = 0.0
+        self.current_step = 0
         self.episode_completed_count = 0
-        self.episode_obsolete_count  = 0
-        self.episode_pickup_count    = 0
-        self.episode_dropoff_count   = 0
-        self._prev_completed_count   = 0
-        self._prev_obsolete_count    = 0
-        self._prev_pickup_count      = 0
-        self._prev_dropoff_count     = 0
+        self.episode_obsolete_count = 0
+        self.episode_pickup_count = 0
+        self.episode_dropoff_count = 0
+        self._prev_completed_count = 0
+        self._prev_obsolete_count = 0
+        self._prev_pickup_count = 0
+        self._prev_dropoff_count = 0
+
+        self.debug_invalid_action_count = 0
+        self.debug_total_action_count = 0
+        self.debug_valid_action_count = 0
+        self.debug_conflict_dropped_count = 0
+        self.debug_capacity_rejected_count = 0
+
+        self.debug_last_invalid_action_count = 0
+        self.debug_last_total_action_count = 0
+        self.debug_last_valid_action_count = 0
+        self.debug_last_conflict_dropped_count = 0
+        self.debug_last_capacity_rejected_count = 0
+        self.debug_last_mask_zero_count = 0
+
+        self.debug_last_r_comp = 0.0
+        self.debug_last_r_wait = 0.0
+        self.debug_last_r_deadline = 0.0
+        self.debug_last_r_obsolete = 0.0
+
+        self.debug_ep_r_comp = 0.0
+        self.debug_ep_r_wait = 0.0
+        self.debug_ep_r_deadline = 0.0
+        self.debug_ep_r_obsolete = 0.0
 
         if self.init_mode == "new":
             self._reset_new_mode()
@@ -312,41 +1275,28 @@ class MultiAgentTaskEnv(gym.Env):
         return obs, {"action_mask": self.action_mask()}
 
     def _reset_new_mode(self):
-        """
-        Initialise robots at their starting positions and seed the task pool.
-
-        Every episode uses ALL batches: tasks are NOT loaded upfront but are
-        injected gradually by _release_pending_tasks() as current_time reaches
-        each batch's release_time.  Batch 0 has release_time=0 so those tasks
-        are available immediately; later batches appear at t=15, 30, …
-        """
-        # ── Robots ────────────────────────────────────────────────────────────
         self.robots = {}
         for agent in self.agents_data:
             robot_id = str(int(agent[0]))
             self.robots[robot_id] = {
-                "id":               robot_id,
-                "x":                float(agent[1]),   # grid col index
-                "y":                float(agent[2]),   # grid row index
-                "max_capacity":     self.max_robot_capacity,
-                "current_capacity": 0,                 # tasks physically onboard
-                "assigned_tasks":   [],                # queue: assigned but not current
-                "current_task":     None,              # task currently being executed
-                "task_phase":       None,              # "pickup" | "travel_to_dropoff"
-                "target_location":  None,              # (x, y) grid coords of next waypoint
-                "path":             [],                # A* path: list of (row, col) cells
-                "just_picked_up_task": None,           # set at pickup for reward shaping
+                "id": robot_id,
+                "x": float(agent[1]),
+                "y": float(agent[2]),
+                "max_capacity": self.max_robot_capacity,
+                "current_capacity": 0,
+                "assigned_tasks": [],
+                "current_task": None,
+                "task_phase": None,
+                "target_location": None,
+                "path": [],
+                "just_picked_up_task": None,
             }
 
-        # ── Tasks ─────────────────────────────────────────────────────────────
-        # Precompute total task count once per episode for _check_episode_done.
         self.total_task_count = sum(len(b) for b in self.tasks_batches)
         self.tasks = {}
-        # Seed tasks whose release_time <= 0 (i.e. batch 0 with release_time=0).
         self._release_pending_tasks()
 
     def _reset_old_mode(self):
-        """Reset for legacy mode (not used in current training)."""
         pass
 
     # =========================================================================
@@ -354,12 +1304,6 @@ class MultiAgentTaskEnv(gym.Env):
     # =========================================================================
 
     def _release_pending_tasks(self):
-        """
-        Inject tasks from ALL batches whose release_time <= current_time.
-
-        Called once in reset() (seeds t=0 tasks) and once per simulation tick
-        inside step() so later batches enter the pool at the right moment.
-        """
         for batch in self.tasks_batches:
             for task_data in batch:
                 task_id = str(int(task_data[0]))
@@ -367,73 +1311,201 @@ class MultiAgentTaskEnv(gym.Env):
                     continue
                 if float(task_data[5]) <= self.current_time:
                     self.tasks[task_id] = {
-                        "id":              task_id,
-                        "pickup_x":        float(task_data[1]),
-                        "pickup_y":        float(task_data[2]),
-                        "dropoff_x":       float(task_data[3]),
-                        "dropoff_y":       float(task_data[4]),
-                        "release_time":    float(task_data[5]),
+                        "id": task_id,
+                        "pickup_x": float(task_data[1]),
+                        "pickup_y": float(task_data[2]),
+                        "dropoff_x": float(task_data[3]),
+                        "dropoff_y": float(task_data[4]),
+                        "release_time": float(task_data[5]),
                         "pickup_deadline": float(task_data[6]),
                         "est_travel_time": float(task_data[7]),
-                        "dropoff_deadline":float(task_data[8]),
-                        "is_assigned":     False,
-                        "is_obsolete":     False,
-                        "is_picked_up":    False,
-                        "is_completed":    False,
-                        "assigned_robot":  None,
+                        "dropoff_deadline": float(task_data[8]),
+                        "is_assigned": False,
+                        "is_obsolete": False,
+                        "is_picked_up": False,
+                        "is_completed": False,
+                        "assigned_robot": None,
                     }
 
     # =========================================================================
     # STEP
     # =========================================================================
+    def _debug_robot_state(self):
+        print("\n================ ROBOT STATE ================")
+        print(f"time={self.current_time:.1f} step={self.current_step}")
 
+        for robot_id in sorted(self.robots.keys()):
+            r = self.robots[robot_id]
+
+            print(
+                f"Robot {robot_id} | "
+                f"cap={r['current_capacity']}/{r['max_capacity']} | "
+                f"current={r['current_task']} ({r['task_phase']}) | "
+                f"queue={r['assigned_tasks']}"
+            )
+
+            # current task
+            if r["current_task"] is not None:
+                t = self.tasks[r["current_task"]]
+                print(
+                    f"   CURRENT -> "
+                    f"picked={t['is_picked_up']} "
+                    f"completed={t['is_completed']} "
+                    f"obsolete={t['is_obsolete']}"
+                )
+
+            # queued tasks
+            for tid in r["assigned_tasks"]:
+                t = self.tasks[tid]
+                print(
+                    f"   QUEUED {tid}: "
+                    f"assigned={t['is_assigned']} "
+                    f"picked={t['is_picked_up']} "
+                    f"completed={t['is_completed']} "
+                    f"obsolete={t['is_obsolete']}"
+                )
+
+        print("=============================================\n")
     def step(self, actions):
-        """
-        Execute one policy step covering decision_interval simulation ticks.
-
-        Tick order per simulation tick:
-          1. Release newly-due tasks (_release_pending_tasks)
-          2. Expire overdue tasks    (_update_task_deadlines)
-          3. Move robots / pickup / dropoff (_execute_robot_movements_and_tasks)
-          4. Advance time
-          5. Compute incremental reward
-        """
-        # Outer decision tick (first of the decision_interval ticks)
+        print(f"Step {self.current_step}: actions={actions}")
         action_info = self._process_actions(actions)
+
+        # macro-step component accumulators
+        macro_r_comp = 0.0
+        macro_r_wait = 0.0
+        macro_r_deadline = 0.0
+        macro_r_obsolete = 0.0
+
         self._release_pending_tasks()
         self._update_task_deadlines()
         self._execute_robot_movements_and_tasks()
-        self.current_time  += 1.0
-        self.current_step  += 1
+        self.current_time += 1.0
+        self.current_step += 1
         reward = self._compute_rewards(action_info)
-        # print(f"step {self.current_step}: action_info={action_info}, released tasks={[t['id'] for t in self.tasks.values() if t['release_time'] <= self.current_time]}")
+
+        macro_r_comp += self.debug_last_r_comp
+        macro_r_wait += self.debug_last_r_wait
+        macro_r_deadline += self.debug_last_r_deadline
+        macro_r_obsolete += self.debug_last_r_obsolete
+
         for _ in range(self.decision_interval - 1):
             if self.current_step >= self.max_steps:
                 break
             self._release_pending_tasks()
             self._update_task_deadlines()
             self._execute_robot_movements_and_tasks()
-            self.current_time  += 1.0
-            self.current_step  += 1
+            self.current_time += 1.0
+            self.current_step += 1
             reward += self._compute_rewards({})
-            
+
+            macro_r_comp += self.debug_last_r_comp
+            macro_r_wait += self.debug_last_r_wait
+            macro_r_deadline += self.debug_last_r_deadline
+            macro_r_obsolete += self.debug_last_r_obsolete
+
             if self._check_episode_done():
                 break
 
         terminated = self._check_episode_done()
-        truncated  = self.current_step >= self.max_steps
-        # print(f"Step {self.current_step}: reward={reward:.3f}, completed={self.episode_completed_count}, obsolete={self.episode_obsolete_count}, pickup={self.episode_pickup_count}, dropoff={self.episode_dropoff_count}, batches={len(self.tasks_batches)}, tasks={len(self.tasks)}")
-        # print(f"Robots: {[{'id': r['id'], 'x': r['x'], 'y': r['y'], 'current_capacity': r['current_capacity'], 'assigned_tasks': r['assigned_tasks'], 'current_task': r['current_task'], 'task_phase': r['task_phase']} for r in self.robots.values()]}")
-        obs  = self._build_observation()
+        truncated = self.current_step >= self.max_steps
+        self._debug_robot_state()
+        
+        obs = self._build_observation()
+        mask = self.action_mask()
+
         info = {
-            "action_mask":     self.action_mask(),
-            "step":            self.current_step,
-            "time":            self.current_time,
+            "action_mask": mask,
+            "step": self.current_step,
+            "time": self.current_time,
             "completed_count": self.episode_completed_count,
-            "obsolete_count":  self.episode_obsolete_count,
-            "pickup_count":    self.episode_pickup_count,
-            "dropoff_count":   self.episode_dropoff_count,
+            "obsolete_count": self.episode_obsolete_count,
+            "pickup_count": self.episode_pickup_count,
+            "dropoff_count": self.episode_dropoff_count,
+
+            "invalid_action_count": self.debug_last_invalid_action_count,
+            "total_action_count": self.debug_last_total_action_count,
+            "valid_action_count": self.debug_last_valid_action_count,
+            "conflict_dropped_count": self.debug_last_conflict_dropped_count,
+            "capacity_rejected_count": self.debug_last_capacity_rejected_count,
+            "mask_zero_count": self.debug_last_mask_zero_count,
+
+            # IMPORTANT: macro-step sums (not last micro-step)
+            "r_comp": float(macro_r_comp),
+            "r_wait": float(macro_r_wait),
+            "r_deadline": float(macro_r_deadline),
+            "r_obsolete": float(macro_r_obsolete),
+
+            "ep_r_comp": self.debug_ep_r_comp,
+            "ep_r_wait": self.debug_ep_r_wait,
+            "ep_r_deadline": self.debug_ep_r_deadline,
+            "ep_r_obsolete": self.debug_ep_r_obsolete,
         }
+        print(f'completed_count:=',self.episode_completed_count, 'obsolete_count:=',self.episode_obsolete_count, 'pickup_count:=',
+              self.episode_pickup_count, 'dropoff_count:=',self.episode_dropoff_count)
+        return obs, reward, terminated, truncated, info
+    def stepold(self, actions):
+        action_info = self._process_actions(actions)
+
+        self._release_pending_tasks()
+        self._update_task_deadlines()
+        self._execute_robot_movements_and_tasks()
+        self.current_time += 1.0
+        self.current_step += 1
+        reward = self._compute_rewards(action_info)
+
+        for _ in range(self.decision_interval - 1):
+            if self.current_step >= self.max_steps:
+                break
+            self._release_pending_tasks()
+            self._update_task_deadlines()
+            self._execute_robot_movements_and_tasks()
+            self.current_time += 1.0
+            self.current_step += 1
+            reward += self._compute_rewards({})
+            if self._check_episode_done():
+                break
+
+        terminated = self._check_episode_done()
+        truncated = self.current_step >= self.max_steps
+
+        obs = self._build_observation()
+        mask = self.action_mask()
+
+        info = {
+            "action_mask": mask,
+            "step": self.current_step,
+            "time": self.current_time,
+            "completed_count": self.episode_completed_count,
+            "obsolete_count": self.episode_obsolete_count,
+            "pickup_count": self.episode_pickup_count,
+            "dropoff_count": self.episode_dropoff_count,
+
+            # per-step diagnostics
+            "invalid_action_count": self.debug_last_invalid_action_count,
+            "total_action_count": self.debug_last_total_action_count,
+            "valid_action_count": self.debug_last_valid_action_count,
+            "conflict_dropped_count": self.debug_last_conflict_dropped_count,
+            "capacity_rejected_count": self.debug_last_capacity_rejected_count,
+            "mask_zero_count": self.debug_last_mask_zero_count,
+
+            # reward components (last decision step aggregate)
+            "r_comp": self.debug_last_r_comp,
+            "r_wait": self.debug_last_r_wait,
+            "r_deadline": self.debug_last_r_deadline,
+            "r_obsolete": self.debug_last_r_obsolete,
+
+            # episode accum diagnostics
+            "ep_invalid_action_count": self.debug_invalid_action_count,
+            "ep_total_action_count": self.debug_total_action_count,
+            "ep_valid_action_count": self.debug_valid_action_count,
+            "ep_conflict_dropped_count": self.debug_conflict_dropped_count,
+            "ep_capacity_rejected_count": self.debug_capacity_rejected_count,
+            "ep_r_comp": self.debug_ep_r_comp,
+            "ep_r_wait": self.debug_ep_r_wait,
+            "ep_r_deadline": self.debug_ep_r_deadline,
+            "ep_r_obsolete": self.debug_ep_r_obsolete,
+        }
+        print(self.debug_last_r_obsolete, 'last_t_obsolete', self.debug_last_r_comp, 'self.debug_last_r_comp ', self.debug_last_r_wait, 'self.debug_last_r_wait', self.debug_last_r_deadline,'debug_last_r_deadline')
         return obs, reward, terminated, truncated, info
 
     # =========================================================================
@@ -442,93 +1514,214 @@ class MultiAgentTaskEnv(gym.Env):
 
     def _process_actions(self, actions) -> Dict:
         """
-        Map policy actions to task assignments with conflict resolution.
-
-        Capacity accounting
-        -------------------
-        A robot's committed capacity = tasks physically onboard
-        (current_capacity) + tasks queued but not yet started (assigned_tasks)
-        + the task it is currently travelling to pick up (current_task when
-        phase == "pickup").  This prevents over-assignment when a robot is
-        already en-route to a pickup location but hasn't arrived yet.
-
-        Conflict resolution: if two robots select the same task, the closer
-        robot wins (greedy by ascending distance).
+        Uses _last_cand_task_ids from observation-time snapshot to prevent
+        index mismatch between policy output and candidate list.
         """
         robot_ids = sorted(self.robots.keys())
-        requests  = []
+        requests = []
 
+        invalid_action_count = 0
+        conflict_dropped_count = 0
+        total_action_count = 0
+        capacity_rejected_count = 0
+
+        act_arr = np.asarray(actions).flatten()
+
+        # for r_idx, action in enumerate(act_arr):
+        #     if r_idx >= len(robot_ids):
+        #         break
+
+        #     total_action_count += 1
+        #     a = int(action)
+
+        #     if a == self._noop_index:
+        #         continue
+
+        #     robot_id = robot_ids[r_idx]
+        #     cands = self._last_cand_task_ids[r_idx] if r_idx < len(self._last_cand_task_ids) else []
+
+        #     if a < 0 or a >= len(cands):
+        #         invalid_action_count += 1
+        #         continue
+
+        #     task_id = cands[a]
         for r_idx, action in enumerate(actions):
+            # total_action_count += 1
             if int(action) == self._noop_index:
                 continue
             if r_idx >= len(robot_ids):
                 break
             robot_id = robot_ids[r_idx]
-            cands    = self._get_candidate_tasks(robot_id)
-            # print(f"Robot {robot_id} candidates: {cands}, action={action}")
-            # cands2 = self._last_cand_task_ids[r_idx]
-            # print(f"Robot {robot_id} candidates: {cands2}, action={action}")
-            if int(action) >= len(cands):
+            cands = self._last_cand_task_ids[r_idx]     # <-- use cached list, not recomputed
+            if int(action) >= len(cands) or cands[int(action)] is None:
                 continue
             task_id = cands[int(action)]
-            robot   = self.robots[robot_id]
-            dist    = np.sqrt(
-                (robot["x"] - self.tasks[task_id]["pickup_x"]) ** 2 +
-                (robot["y"] - self.tasks[task_id]["pickup_y"]) ** 2
+            task = self.tasks.get(task_id)
+
+            if task is None or task.get("is_assigned") or task.get("is_obsolete") or task.get("is_completed"):
+                invalid_action_count += 1
+                continue
+
+            robot = self.robots[robot_id]
+            dist = np.sqrt(
+                (robot["x"] - task["pickup_x"]) ** 2 +
+                (robot["y"] - task["pickup_y"]) ** 2
             )
             requests.append((dist, robot_id, task_id))
 
-        # Closest robot wins any conflict on the same task
         requests.sort()
         assigned_this_step = set()
-        action_info        = {}
+        action_info = {}
 
         for _dist, robot_id, task_id in requests:
             if task_id in assigned_this_step:
-                continue  # another robot already claimed this task
+                conflict_dropped_count += 1
+                continue
 
             robot = self.robots[robot_id]
-            task  = self.tasks.get(task_id)
-
-            # Skip if task disappeared (obsoleted between obs and action)
-            if task is None or task.get("is_assigned") or task.get("is_obsolete"):
+            task = self.tasks.get(task_id)
+            if task is None or task.get("is_assigned") or task.get("is_obsolete") or task.get("is_completed"):
+                invalid_action_count += 1
                 continue
 
-            # Total committed capacity:
-            #   current_capacity  = physically onboard (picked up, not dropped off)
-            #   len(assigned_tasks) = queued but not yet current_task
-            #   +1 if current_task is in pickup phase (committed but not onboard yet)
-            in_pickup_phase = (
-                robot["current_task"] is not None and
-                robot["task_phase"] == "pickup"
-            )
-            total_committed = (
-                robot["current_capacity"] +
-                len(robot["assigned_tasks"]) +
-                (1 if in_pickup_phase else 0)
-            )
+            in_pickup_phase = (robot["current_task"] is not None and robot["task_phase"] == "pickup")
+            if self.capacity_method == "assigned":
+                total_committed = (
+                    robot["current_capacity"]
+                    + len(robot["assigned_tasks"])
+                    + (1 if in_pickup_phase else 0)
+                )
+            else:
+                total_committed = robot["current_capacity"]
 
             if total_committed >= self.max_robot_capacity:
+                capacity_rejected_count += 1
                 continue
 
-            # Assign
             robot["assigned_tasks"].append(task_id)
-            task["is_assigned"]    = True
+            task["is_assigned"] = True
             task["assigned_robot"] = robot_id
             assigned_this_step.add(task_id)
             action_info[robot_id] = {"assigned_task": task_id}
 
+        valid_action_count = len(action_info)
+
+        self.debug_last_invalid_action_count = int(invalid_action_count)
+        self.debug_last_total_action_count = int(total_action_count)
+        self.debug_last_valid_action_count = int(valid_action_count)
+        self.debug_last_conflict_dropped_count = int(conflict_dropped_count)
+        self.debug_last_capacity_rejected_count = int(capacity_rejected_count)
+
+        self.debug_invalid_action_count += int(invalid_action_count)
+        self.debug_total_action_count += int(total_action_count)
+        self.debug_valid_action_count += int(valid_action_count)
+        self.debug_conflict_dropped_count += int(conflict_dropped_count)
+        self.debug_capacity_rejected_count += int(capacity_rejected_count)
+
+        action_info["_diag"] = {
+            "invalid_action_count": int(invalid_action_count),
+            "total_action_count": int(total_action_count),
+            "valid_action_count": int(valid_action_count),
+            "conflict_dropped_count": int(conflict_dropped_count),
+            "capacity_rejected_count": int(capacity_rejected_count),
+        }
+        print(f"Step {self.current_step}: invalid={invalid_action_count}, total={total_action_count}, valid={valid_action_count}, conflict_dropped={conflict_dropped_count}, capacity_rejected={capacity_rejected_count}")
         return action_info
 
     # =========================================================================
     # CANDIDATE TASKS
     # =========================================================================
+# src/environment/environment.py
+
+    def _remaining_capacity(self, robot_id) -> int:
+        """Free 'seats' on this robot right now, mirroring the reference adapter's
+        _remaining_capacity(): onboard + queued + in-flight pickup all count."""
+        robot = self.robots.get(str(robot_id))
+        if robot is None:
+            return 0
+        in_pickup_phase = (
+            robot["current_task"] is not None and robot["task_phase"] == "pickup"
+        )
+        if self.capacity_method == "assigned":
+            committed = (
+                robot["current_capacity"]
+                + len(robot["assigned_tasks"])
+                + (1 if in_pickup_phase else 0)
+            )
+        else:   # pickup
+            committed = robot["current_capacity"]
+
+        return max(0, robot["max_capacity"] - committed)
+
 
     def _get_candidate_tasks(self, robot_id) -> List[str]:
-        """
-        Return up to K_max available tasks within vicinity_m of the robot,
+        """Return up to K_max available tasks within vicinity_m of the robot,
         sorted by ascending Euclidean distance to pickup location.
+        Gated by the robot's own remaining capacity — a full robot gets an
+        empty candidate list (forced no-op), matching the reference adapter.
         """
+        assigned = 0
+        completed = 0
+        obsolete = 0
+        future = 0
+        deadline = 0
+        far = 0
+        accepted = 0
+        robot = self.robots.get(str(robot_id))
+        if robot is None:
+            return []
+
+        if self._remaining_capacity(robot_id) <= 0:
+            return []
+
+        candidates = []
+        for task_id, task in self.tasks.items():
+            if task["is_assigned"]:
+                assigned += 1
+                
+
+            if task["is_completed"]:
+                completed += 1
+                
+
+            if task["is_obsolete"]:
+                obsolete += 1
+                
+
+            if task["release_time"] > self.current_time:
+                future += 1
+                continue
+
+            if task["pickup_deadline"] <= self.current_time:
+                deadline += 1
+                continue
+            dist = np.sqrt(
+                (robot["x"] - task["pickup_x"]) ** 2 +
+                (robot["y"] - task["pickup_y"]) ** 2
+            )
+            if task["is_assigned"] or task["is_completed"] or task["is_obsolete"]:
+                continue
+            if dist > self.vicinity_m:
+                far += 1
+                continue
+            if dist <= self.vicinity_m:
+                accepted += 1
+                candidates.append((dist, task_id))
+
+        candidates.sort()
+        # print(
+        #     robot_id,
+        #     "accepted", accepted,
+        #     "assigned", assigned,s
+        #     "completed", completed,
+        #     "obsolete", obsolete,
+        #     "future", future,
+        #     "deadline", deadline,
+        #     "far", far,
+        #     "candidates", len(candidates)
+        # )
+        return [tid for _, tid in candidates[: self.K_max]]
+    def _get_candidate_tasks_no_capacity_check(self, robot_id) -> List[str]:
         robot = self.robots.get(str(robot_id))
         if robot is None:
             return []
@@ -557,130 +1750,79 @@ class MultiAgentTaskEnv(gym.Env):
 
     def _update_task_deadlines(self):
         """
-        Mark expired tasks obsolete and clean up the owning robot's state.
-
-        Capacity notes:
-          - If the task was already picked up (is_picked_up=True), it
-            occupies a slot in current_capacity → decrement.
-          - If it was only assigned (not yet picked up), it is still in
-            assigned_tasks or is current_task in pickup phase → no
-            current_capacity decrement, but must be removed from the queue.
+        Deadline handling policy:
+        - Not picked up yet: pickup deadline expiry => obsolete.
+        - Already picked up: NEVER obsolete; keep delivery, penalize lateness in reward.
         """
         for task_id, task in list(self.tasks.items()):
-            if task.get("is_obsolete") or task.get("is_completed"):
+            if task.get("is_completed") or task.get("is_obsolete"):
                 continue
 
-            # Determine if expired
             if not task.get("is_picked_up"):
-                # print(f"Checking task {task_id} for expiration: pickup_deadline={task.get('pickup_deadline')}, current_time={self.current_time}")
-                expired = task.get("pickup_deadline", float("inf")) <= self.current_time
+                expired_pickup = task.get("pickup_deadline", float("inf")) <= self.current_time
+                if not expired_pickup:
+                    continue
+
+                task["is_obsolete"] = True
+                self.episode_obsolete_count += 1
+
+                assigned_id = task.get("assigned_robot")
+                if assigned_id and assigned_id in self.robots:
+                    robot = self.robots[assigned_id]
+
+                    if task_id in robot["assigned_tasks"]:
+                        robot["assigned_tasks"].remove(task_id)
+
+                    if robot["current_task"] == task_id and robot.get("task_phase") == "pickup":
+                        robot["current_task"] = None
+                        robot["task_phase"] = None
+                        robot["target_location"] = None
+                        robot["path"] = []
+
             else:
-                # print(f"Checking task {task_id} for expiration: dropoff_deadline={task.get('dropoff_deadline')}, current_time={self.current_time}")
-                expired = task.get("dropoff_deadline", float("inf")) <= self.current_time
-
-            if not expired:
-                continue
-
-            task["is_obsolete"]         = True
-            self.episode_obsolete_count += 1
-
-            # Clean up the assigned robot
-            assigned_id = task.get("assigned_robot")
-            if assigned_id and assigned_id in self.robots:
-                robot = self.robots[assigned_id]
-
-                # Decrement onboard count only if physically picked up
-                if task.get("is_picked_up"):
-                    robot["current_capacity"] = max(0, robot["current_capacity"] - 1)
-
-                # Remove from queue if present
-                if task_id in robot["assigned_tasks"]:
-                    robot["assigned_tasks"].remove(task_id)
-
-                # Clear current_task if robot was executing this task
-                if robot["current_task"] == task_id:
-                    robot["current_task"]     = None
-                    robot["task_phase"]       = None
-                    robot["target_location"]  = None
-                    robot["path"]             = []   # discard stale A* path
+                # Picked up tasks are kept alive; lateness handled at dropoff reward.
+                pass
 
     # =========================================================================
     # ROBOT MOVEMENT — A* path following
     # =========================================================================
 
     def _execute_robot_movements_and_tasks(self):
-        """
-        Advance robot state machines: dequeue tasks, follow A* path,
-        execute pickup / dropoff on arrival.
-        """
         for robot_id, robot in self.robots.items():
-            # Dequeue next task if robot has nothing to do
             if robot["current_task"] is None and robot["assigned_tasks"]:
                 next_task_id = robot["assigned_tasks"].pop(0)
                 task = self.tasks.get(next_task_id)
                 if task is None or task.get("is_obsolete"):
-                    continue  # task expired while queued
-                robot["current_task"]    = next_task_id
-                robot["task_phase"]      = "pickup"
+                    continue
+                robot["current_task"] = next_task_id
+                robot["task_phase"] = "pickup"
                 robot["target_location"] = (task["pickup_x"], task["pickup_y"])
-                robot["path"]            = []   # will be planned on first movement
+                robot["path"] = []
 
             if robot["current_task"] is not None:
                 self._move_robot_toward_target(robot_id)
 
     def _move_robot_toward_target(self, robot_id: str):
-        """
-        Move robot one step along its A* path toward the current target.
-
-        Path planning
-        -------------
-        On the first call after a new target is set (robot["path"] == []),
-        A* is invoked to compute a collision-free path from the robot's
-        current grid cell to the target cell.  The resulting list of
-        (row, col) waypoints is stored on the robot and consumed one cell
-        per simulation tick.
-
-        If A* cannot find a path (obstacle-blocked), the robot falls back
-        to straight-line movement so it is never permanently stuck.
-
-        Coordinate conventions
-        ----------------------
-        robot["x"] = grid column   robot["y"] = grid row
-        A* takes (row, col) = (int(y), int(x))
-        After following a waypoint the robot position is updated to the
-        exact (col, row) of that waypoint (integer grid cell).
-        """
-        robot    = self.robots[robot_id]
+        robot = self.robots[robot_id]
         target_x, target_y = robot["target_location"]
 
-        # ── Plan path if we don't have one ────────────────────────────────────
         if not robot["path"]:
             start = (int(round(robot["y"])), int(round(robot["x"])))
-            goal  = (int(round(target_y)),   int(round(target_x)))
-
-            if start == goal:
-                # Already at target — let the arrival logic below handle it
-                pass
-            else:
+            goal = (int(round(target_y)), int(round(target_x)))
+            if start != goal:
                 found, path = self.planner.get_plan(start, goal)
                 if found and path and len(path) > 1:
-                    # path[0] is the start cell; skip it (robot is already there)
                     robot["path"] = list(path[1:])
                 else:
-                    # A* failed (e.g. start/goal in obstacle) — straight-line fallback
                     robot["path"] = []
 
-        # ── Follow next waypoint ───────────────────────────────────────────────
         if robot["path"]:
             next_row, next_col = robot["path"][0]
-
-            # Move toward the next cell by up to movement_speed units
-            dx   = float(next_col) - robot["x"]
-            dy   = float(next_row) - robot["y"]
+            dx = float(next_col) - robot["x"]
+            dy = float(next_row) - robot["y"]
             dist = np.sqrt(dx * dx + dy * dy)
 
             if dist <= self.movement_speed:
-                # Snap to the waypoint exactly and consume it
                 robot["x"] = float(next_col)
                 robot["y"] = float(next_row)
                 robot["path"].pop(0)
@@ -689,54 +1831,51 @@ class MultiAgentTaskEnv(gym.Env):
                 robot["y"] += (dy / dist) * self.movement_speed
             return
 
-        # ── No path remaining: check if we have arrived ───────────────────────
-        # (handles both the "path exhausted" and "start==goal" cases)
-        dx   = target_x - robot["x"]
-        dy   = target_y - robot["y"]
+        dx = target_x - robot["x"]
+        dy = target_y - robot["y"]
         dist = np.sqrt(dx * dx + dy * dy)
 
         if dist > 0.5:
-            # Path exhausted but not at target (A* fallback: straight-line nudge)
             move = min(self.movement_speed, dist)
             robot["x"] += (dx / dist) * move
             robot["y"] += (dy / dist) * move
             return
 
-        # ── Arrival ───────────────────────────────────────────────────────────
         task_id = robot["current_task"]
-        task    = self.tasks.get(task_id)
+        task = self.tasks.get(task_id)
         if task is None:
-            robot["current_task"]    = None
-            robot["task_phase"]      = None
+            robot["current_task"] = None
+            robot["task_phase"] = None
             robot["target_location"] = None
-            robot["path"]            = []
+            robot["path"] = []
             return
 
         if robot["task_phase"] == "pickup":
-            robot["current_capacity"]  += 1
-            task["is_picked_up"]        = True
-            self.episode_pickup_count  += 1
-            robot["just_picked_up_task"] = task_id      # used by reward shaping
-            robot["task_phase"]         = "travel_to_dropoff"
-            robot["target_location"]    = (task["dropoff_x"], task["dropoff_y"])
-            robot["path"]               = []             # plan fresh for dropoff leg
+            robot["current_capacity"] += 1
+            task["is_picked_up"] = True
+            self.episode_pickup_count += 1
+            task["pickup_time"] = self.current_time
+            robot["just_picked_up_task"] = task_id
+            robot["task_phase"] = "travel_to_dropoff"
+            robot["target_location"] = (task["dropoff_x"], task["dropoff_y"])
+            robot["path"] = []
 
         elif robot["task_phase"] == "travel_to_dropoff":
-            robot["current_capacity"]    = max(0, robot["current_capacity"] - 1)
-            task["is_completed"]         = True
-            self.episode_dropoff_count  += 1
+            robot["current_capacity"] = max(0, robot["current_capacity"] - 1)
+            task["dropoff_time"] = self.current_time
+            task["is_completed"] = True
+            self.episode_dropoff_count += 1
             self.episode_completed_count += 1
-            robot["current_task"]        = None
-            robot["task_phase"]          = None
-            robot["target_location"]     = None
-            robot["path"]                = []
+            robot["current_task"] = None
+            robot["task_phase"] = None
+            robot["target_location"] = None
+            robot["path"] = []
 
     # =========================================================================
     # OBSERVATION
     # =========================================================================
 
     def _build_observation(self) -> Dict:
-        """Build GNN observation using build_padded_ego_batch."""
         robot_ids = sorted(self.robots.keys())
         if len(robot_ids) < self.num_robots:
             robot_ids += [None] * (self.num_robots - len(robot_ids))
@@ -773,156 +1912,101 @@ class MultiAgentTaskEnv(gym.Env):
     # =========================================================================
     # REWARD
     # =========================================================================
+
     def _compute_rewards(self, action_info) -> float:
-        robots = self.robots.values()
+        W_COMP = 2.0
+        W_WAIT = 1
+        W_DEADLINE = 10.0
+        W_OBS = 1.0
 
-        W_COMP = 10.0
-        W_WAIT = 1.5
-        W_DEADLINE = 5.0
-        W_TRAVEL = 2.0
-
-        WAIT_CAP = self.max_wait_delay_s
-        DEADLINE_CAP = self.max_travel_delay_s
+        WAIT_CAP = max(1.0, float(self.max_wait_delay_s))
+        DEADLINE_CAP = max(1.0, float(self.max_travel_delay_s))
 
         reward = 0.0
+        r_comp = 0.0
+        r_wait = 0.0
+        r_deadline = 0.0
+        r_obsolete = 0.0
 
-        # =========================================================
-        # 1. PICKUP EVENTS (WAIT penalty + implicit progress signal)
-        # =========================================================
-        for r in robots:
+        # 1) pickup wait penalty
+        for r in self.robots.values():
             task_id = r.get("just_picked_up_task")
             if not task_id:
                 continue
-
             task = self.tasks.get(task_id)
             if task is None:
+                r["just_picked_up_task"] = None
                 continue
 
-            # wait time since release
             wait = max(0.0, self.current_time - task["release_time"])
-            wait_pen = -min(wait, WAIT_CAP) / WAIT_CAP
-
-            reward += W_WAIT * wait_pen
-
-            # optional: store pickup time
-            task["pickup_time"] = self.current_time
-
+            delta = W_WAIT * (-min(wait, WAIT_CAP) / WAIT_CAP)
+            reward += delta
+            r_wait += delta
             r["just_picked_up_task"] = None
 
-        # =========================================================
-        # 2. DROPOFF EVENTS (MAIN REWARD SIGNAL)
-        # =========================================================
-        for task_id, task in self.tasks.items():
+        # 2) completion + lateness penalties
+        for task in self.tasks.values():
             if not task.get("is_completed"):
                 continue
-
-            # ensure single counting
             if task.get("_rewarded"):
                 continue
             task["_rewarded"] = True
 
-            rid = task.get("assigned_robot")
-            if rid is None:
-                continue
-
-            # completion reward
             reward += W_COMP
+            r_comp += W_COMP
 
-            # deadline quality (pickup + dropoff correctness)
             pickup_time = task.get("pickup_time", self.current_time)
             dropoff_time = task.get("dropoff_time", self.current_time)
 
-            # pickup lateness
             if task.get("pickup_deadline") is not None:
                 late_p = max(0.0, pickup_time - task["pickup_deadline"])
-                reward += W_DEADLINE * (-min(late_p, DEADLINE_CAP) / DEADLINE_CAP)
+                delta = W_DEADLINE * (-min(late_p, DEADLINE_CAP) / DEADLINE_CAP)
+                reward += delta
+                r_deadline += delta
 
-            # dropoff lateness
             if task.get("dropoff_deadline") is not None:
                 late_d = max(0.0, dropoff_time - task["dropoff_deadline"])
-                reward += W_DEADLINE * (-min(late_d, DEADLINE_CAP) / DEADLINE_CAP)
+                delta = W_DEADLINE * (-min(late_d, DEADLINE_CAP) / DEADLINE_CAP)
+                reward += delta
+                r_deadline += delta
 
-            task["dropoff_time"] = self.current_time
-
-        # =========================================================
-        # 3. OBSOLETE TASK PENALTY (strong failure signal)
-        # =========================================================
-        for task_id, task in self.tasks.items():
+        # 3) obsolete penalties (only not-picked tasks become obsolete by design)
+        for task in self.tasks.values():
             if not task.get("is_obsolete"):
                 continue
-
             if task.get("_obsolete_rewarded"):
                 continue
             task["_obsolete_rewarded"] = True
 
-            rid = task.get("assigned_robot")
-            if rid is None:
-                continue
-
-            # stronger penalty than completion reward
-            reward += -W_COMP * 0.5
-
-            # additional deadline-based penalty
+            delta_obs = -W_OBS
+            reward += delta_obs
+            r_obsolete += delta_obs
+            # print(r_obsolete,'r_obsolete')
             late = max(0.0, self.current_time - task.get("pickup_deadline", self.current_time))
-            reward += W_DEADLINE * (-min(late, DEADLINE_CAP) / DEADLINE_CAP)
-        # print(f"Step {self.current_step}: reward={reward:.3f}, completed={self.episode_completed_count}, obsolete={self.episode_obsolete_count}, pickup={self.episode_pickup_count}, dropoff={self.episode_dropoff_count}")
+            delta_dead = W_DEADLINE * (-min(late, DEADLINE_CAP) / DEADLINE_CAP)
+            reward += delta_dead
+            r_deadline += delta_dead
+
+        self.debug_last_r_comp = float(r_comp)
+        self.debug_last_r_wait = float(r_wait)
+        self.debug_last_r_deadline = float(r_deadline)
+        self.debug_last_r_obsolete = float(r_obsolete)
+
+        self.debug_ep_r_comp += float(r_comp)
+        self.debug_ep_r_wait += float(r_wait)
+        self.debug_ep_r_deadline += float(r_deadline)
+        self.debug_ep_r_obsolete += float(r_obsolete)
+        # print(self.debug_ep_r_obsolete,'debug_ep_r_obsolete')
         return float(reward)
-    def _compute_rewardsold(self, action_info) -> float:
-        """
-        Shaped reward with incremental deltas:
-          +W_COMP  per completed task
-          -W_WAIT * (wait / WAIT_CAP)  per pickup (wait since release)
-          -W_DEADLINE * 0.5  per obsolete task
-        """
-        new_complete = self.episode_completed_count - self._prev_completed_count
-        new_obsolete = self.episode_obsolete_count  - self._prev_obsolete_count
-
-        self._prev_completed_count = self.episode_completed_count
-        self._prev_obsolete_count  = self.episode_obsolete_count
-        self._prev_pickup_count    = self.episode_pickup_count
-        self._prev_dropoff_count   = self.episode_dropoff_count
-
-        W_COMP     = 10.0
-        W_WAIT     = 1.5
-        W_DEADLINE = 5.0
-        WAIT_CAP   = max(1.0, float(self.max_wait_delay_s))
-
-        reward = float(new_complete) * W_COMP
-
-        # Wait penalty: assessed at moment of pickup
-        for robot in self.robots.values():
-            picked_id = robot.get("just_picked_up_task")
-            if picked_id:
-                t = self.tasks.get(picked_id)
-                if t is not None:
-                    wait_s  = max(0.0, self.current_time - t["release_time"])
-                    reward += -(min(wait_s, WAIT_CAP) / WAIT_CAP) * W_WAIT
-                robot["just_picked_up_task"] = None
-                print(f"Robot {robot['id']} picked up task {picked_id} at time {self.current_time:.1f}, wait={wait_s:.1f}s, reward delta={-(min(wait_s, WAIT_CAP) / WAIT_CAP) * W_WAIT:.3f}")
-
-        # Obsolescence penalty
-        reward -= float(new_obsolete) * (W_DEADLINE)
-        print(f"Step {self.current_step}: reward completed={new_complete * W_COMP}, obsolete={new_obsolete* (W_DEADLINE)} total reward={reward:.3f}")
-        return reward
 
     # =========================================================================
     # TERMINATION
     # =========================================================================
 
     def _check_episode_done(self) -> bool:
-        """
-        The episode is done when:
-          1. Every task from every batch has been released (injected into
-             self.tasks) — meaning current_time has passed the last
-             batch's release_time, AND
-          2. Every released task is either completed or obsolete, AND
-          3. All robots are idle (no current task and no queued tasks).
-        """
-        # Condition 1: all tasks released
         if len(self.tasks) < self.total_task_count:
             return False
 
-        # Condition 2: no task still pending
         any_pending = any(
             not t.get("is_completed") and not t.get("is_obsolete")
             for t in self.tasks.values()
@@ -930,7 +2014,6 @@ class MultiAgentTaskEnv(gym.Env):
         if any_pending:
             return False
 
-        # Condition 3: robots idle
         robots_idle = all(
             len(r["assigned_tasks"]) == 0 and r["current_task"] is None
             for r in self.robots.values()
@@ -942,13 +2025,15 @@ class MultiAgentTaskEnv(gym.Env):
     # =========================================================================
 
     def action_mask(self) -> np.ndarray:
-        """Return valid action mask (R, K_max+1). NO-OP is always valid."""
         mask = np.zeros((self.num_robots, self.K_max + 1), dtype=np.uint8)
         for r in range(self.num_robots):
-            for k in range(min(self.K_max, len(self._last_cand_task_ids[r]))):
-                if self._last_cand_task_ids[r][k] is not None:
+            cand_list = self._last_cand_task_ids[r] if r < len(self._last_cand_task_ids) else []
+            for k in range(min(self.K_max, len(cand_list))):
+                if cand_list[k] is not None:
                     mask[r, k] = 1
-            mask[r, self._noop_index] = 1   # NO-OP always allowed
+            mask[r, self._noop_index] = 1
+
+        self.debug_last_mask_zero_count = int(np.sum(mask[:, :self._noop_index] == 0))
         return mask
 
     def close(self):
