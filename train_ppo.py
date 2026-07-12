@@ -375,16 +375,16 @@ def main():
                 tensorboard_log=str(tb_dir),
             )
             # ------------------------optimizer check
-            actor_ids = {id(p) for p in model.policy.gnn_ac.parameters()} | {id(model.policy.noop_logit)}
-            opt_ids = {id(p) for g in model.policy.optimizer.param_groups for p in g["params"]}
-            missing = actor_ids - opt_ids
-            assert not missing, f"{len(missing)} actor params NOT in optimizer — this is the bug"
-            print(f"actor params: {len(actor_ids)}, in optimizer: {len(actor_ids & opt_ids)}")
+            # actor_ids = {id(p) for p in model.policy.gnn_ac.parameters()} | {id(model.policy.noop_logit)}
+            # opt_ids = {id(p) for g in model.policy.optimizer.param_groups for p in g["params"]}
+            # missing = actor_ids - opt_ids
+            # assert not missing, f"{len(missing)} actor params NOT in optimizer — this is the bug"
+            # print(f"actor params: {len(actor_ids)}, in optimizer: {len(actor_ids & opt_ids)}")
 
-            print("\n=== ACTOR PARAMETERS ===")
-            for name, p in model.policy.gnn_ac.named_parameters():
-                print(f"{name:40s} requires_grad={p.requires_grad} shape={tuple(p.shape)}")
-            print("========================\n")
+            # print("\n=== ACTOR PARAMETERS ===")
+            # for name, p in model.policy.gnn_ac.named_parameters():
+            #     print(f"{name:40s} requires_grad={p.requires_grad} shape={tuple(p.shape)}")
+            # print("========================\n")
 
 
             # ------------------------

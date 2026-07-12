@@ -86,7 +86,7 @@ class DataGenerator:
                 estimated_travel_time = len(path) if found else float('inf')
 
                 # Calculate deadlines
-                pickup_deadline = (t_release + 0.8) * self.max_waiting_time
+                pickup_deadline = (t_release * i) + self.max_waiting_time
                 drop_off_deadline = pickup_deadline + (estimated_travel_time * (1 + self.max_travel_delay_percentage))
 
                 # Generate a unique ID (task)
@@ -136,7 +136,7 @@ if __name__ == "__main__":
     y_min, y_max = params['y_min'], params['y_max']
     map_resolution = params['map_resolution']
     Planning_resolution = params['Planning_resolution']
-    max_waiting_time = 120
+    max_waiting_time = 200
     max_travel_delay_percentage = 2
 
     # Initialize planner (expects Planner to load map from env/ATC_wed.yaml)

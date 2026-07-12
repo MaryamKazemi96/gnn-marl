@@ -859,32 +859,40 @@ def plot_debug_summary_table(det_data, stoch_data, out_png):
             "capacity_reject_rate": float(st.get("capacity_reject_rate", 0.0)),
             "conflict_drop_rate": float(st.get("conflict_drop_rate", 0.0)),
             "noop_frac_mean": float(st.get("noop_frac_mean", 0.0)),
+            # noop breakdown: forced = no candidates offered (structural),
+            # chosen = policy picked noop despite candidates being available.
+            # chosen_noop_rate_when_available is the one that matters most —
+            # it's the noop rate restricted to decisions the policy could
+            # actually have acted on.
+            "noop_frac_forced": float(st.get("noop_frac_forced", 0.0)),
+            "noop_frac_chosen": float(st.get("noop_frac_chosen", 0.0)),
+            "chosen_noop_rate_when_available": float(st.get("chosen_noop_rate_when_available", 0.0)),
             "mask_zero_mean": float(st.get("mask_zero_mean", 0.0)),
             "r_comp_mean": float(st.get("r_comp_mean", 0.0)),
             "r_wait_mean": float(st.get("r_wait_mean", 0.0)),
             "r_deadline_mean": float(st.get("r_deadline_mean", 0.0)),
             "r_obsolete_mean": float(st.get("r_obsolete_mean", 0.0)),
         }
-
+ 
     det = extract(det_data)
     sto = extract(stoch_data)
-
+ 
     cols = ["Metric", "Deterministic", "Stochastic"]
     rows = []
     for k in det.keys():
         rows.append([k, f"{det[k]:.4f}", f"{sto[k]:.4f}"])
-
-    fig, ax = plt.subplots(figsize=(9, 6), facecolor="white")
+ 
+    fig, ax = plt.subplots(figsize=(9, 7.5), facecolor="white")
     ax.axis("off")
     table = ax.table(cellText=rows, colLabels=cols, cellLoc="center", loc="center")
     table.auto_set_font_size(False)
     table.set_fontsize(10)
     table.scale(1.1, 1.6)
-
+ 
     for i in range(len(cols)):
         table[(0, i)].set_facecolor("#34495e")
         table[(0, i)].set_text_props(weight="bold", color="white")
-
+ 
     ax.set_title("Debug Summary Metrics", fontsize=14, fontweight="bold", pad=16)
     _save_fig(fig, out_png)
 

@@ -100,12 +100,12 @@ decision_interval: 8  # Steps between policy decisions
 ppo_steps: 64
 batch_size: 64
 learning_rate: 0.0003
-ent_coef: 0.3
-total_timesteps: 2
+ent_coef: 0.003
+total_timesteps: 5000
 noop_init:   -1.0      
 
 
-max_steps: 50
+max_steps: 2500
 
 
 #experiments
