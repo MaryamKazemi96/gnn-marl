@@ -133,7 +133,11 @@ class MultiAgentTaskEnv(gym.Env):
         feature_size: int = 9,
         use_true_id: bool = False,
         reward_mode: str = "new",
-        capacity_method: str = "assigned"
+        capacity_method: str = "assigned",
+        W_COMP: float = 2.0,
+        W_WAIT: float = 1.0,
+        W_DEADLINE: float = 10.0,
+        W_OBS: float = 0.5,
     ):
         super().__init__()
 
@@ -171,6 +175,10 @@ class MultiAgentTaskEnv(gym.Env):
         self.decision_interval = decision_interval
         self.max_wait_delay_s = max_wait_delay_s
         self.max_travel_delay_s = max_travel_delay_s
+        self.W_COMP = float(W_COMP)
+        self.W_WAIT = float(W_WAIT)
+        self.W_DEADLINE = float(W_DEADLINE)
+        self.W_OBS = float(W_OBS)
 
         self.robots = {}
         self.tasks = {}
@@ -187,12 +195,16 @@ class MultiAgentTaskEnv(gym.Env):
         self._prev_pickup_count = 0
         self._prev_dropoff_count = 0
 
-        # diagnostics (episode-level)
+       # diagnostics (episode-level)
         self.debug_invalid_action_count = 0
         self.debug_total_action_count = 0
         self.debug_valid_action_count = 0
         self.debug_conflict_dropped_count = 0
         self.debug_capacity_rejected_count = 0
+        self.debug_noop_forced_count = 0     # noop because no candidates were offered
+        self.debug_noop_chosen_count = 0     # noop despite candidates being available
+        self.debug_had_candidates_count = 0  # decisions where >=1 real candidate existed
+        self.debug_decisions_total = 0
 
         # diagnostics (last-step)
         self.debug_last_invalid_action_count = 0
@@ -201,6 +213,10 @@ class MultiAgentTaskEnv(gym.Env):
         self.debug_last_conflict_dropped_count = 0
         self.debug_last_capacity_rejected_count = 0
         self.debug_last_mask_zero_count = 0
+        self.debug_last_noop_forced_count = 0
+        self.debug_last_noop_chosen_count = 0
+        self.debug_last_had_candidates_count = 0
+        self.debug_last_decisions_total = 0
 
         self.debug_last_r_comp = 0.0
         self.debug_last_r_wait = 0.0
@@ -292,6 +308,10 @@ class MultiAgentTaskEnv(gym.Env):
         self.debug_valid_action_count = 0
         self.debug_conflict_dropped_count = 0
         self.debug_capacity_rejected_count = 0
+        self.debug_noop_forced_count = 0
+        self.debug_noop_chosen_count = 0
+        self.debug_had_candidates_count = 0
+        self.debug_decisions_total = 0
 
         self.debug_last_invalid_action_count = 0
         self.debug_last_total_action_count = 0
@@ -299,6 +319,10 @@ class MultiAgentTaskEnv(gym.Env):
         self.debug_last_conflict_dropped_count = 0
         self.debug_last_capacity_rejected_count = 0
         self.debug_last_mask_zero_count = 0
+        self.debug_last_noop_forced_count = 0
+        self.debug_last_noop_chosen_count = 0
+        self.debug_last_had_candidates_count = 0
+        self.debug_last_decisions_total = 0
 
         self.debug_last_r_comp = 0.0
         self.debug_last_r_wait = 0.0
@@ -474,6 +498,12 @@ class MultiAgentTaskEnv(gym.Env):
             "capacity_rejected_count": self.debug_last_capacity_rejected_count,
             "mask_zero_count": self.debug_last_mask_zero_count,
 
+            # noop diagnostics
+            "noop_forced_count": self.debug_last_noop_forced_count,
+            "noop_chosen_count": self.debug_last_noop_chosen_count,
+            "had_candidates_count": self.debug_last_had_candidates_count,
+            "decisions_total": self.debug_last_decisions_total,
+
             # IMPORTANT: macro-step sums (not last micro-step)
             "r_comp": float(macro_r_comp),
             "r_wait": float(macro_r_wait),
@@ -492,7 +522,6 @@ class MultiAgentTaskEnv(gym.Env):
     # =========================================================================
     # ACTION PROCESSING
     # =========================================================================
-
     def _process_actions(self, actions) -> Dict:
         """
         Uses _last_cand_task_ids from observation-time snapshot to prevent
@@ -502,9 +531,167 @@ class MultiAgentTaskEnv(gym.Env):
         requests = []
 
         invalid_action_count = 0
+        valid_action_count = 0
+        conflict_dropped_count = 0
+        capacity_rejected_count = 0
+
+        step_noop_forced = 0
+        step_noop_chosen = 0
+        step_had_candidates = 0
+        step_decisions = 0
+
+        for r_idx, action in enumerate(actions):
+
+            if r_idx >= len(robot_ids):
+                break
+
+            offered = self._last_cand_task_ids[r_idx]
+            had_candidates = any(t is not None for t in offered)
+            is_noop = (int(action) == self._noop_index)
+
+            # ---------- episode totals ----------
+            self.debug_decisions_total += 1
+            step_decisions += 1
+
+            if had_candidates:
+                self.debug_had_candidates_count += 1
+                step_had_candidates += 1
+
+            if is_noop:
+                if had_candidates:
+                    self.debug_noop_chosen_count += 1
+                    step_noop_chosen += 1
+                else:
+                    self.debug_noop_forced_count += 1
+                    step_noop_forced += 1
+                continue
+
+            robot_id = robot_ids[r_idx]
+            cands = self._last_cand_task_ids[r_idx]
+
+            if int(action) >= len(cands) or cands[int(action)] is None:
+                invalid_action_count += 1
+                continue
+
+            task_id = cands[int(action)]
+            task = self.tasks.get(task_id)
+
+            if (
+                task is None
+                or task.get("is_assigned")
+                or task.get("is_obsolete")
+                or task.get("is_completed")
+            ):
+                invalid_action_count += 1
+                continue
+
+            robot = self.robots[robot_id]
+
+            dist = np.sqrt(
+                (robot["x"] - task["pickup_x"]) ** 2
+                + (robot["y"] - task["pickup_y"]) ** 2
+            )
+
+            requests.append((dist, robot_id, task_id))
+
+        # ---------------------------------------------------
+        # Resolve conflicts
+        # ---------------------------------------------------
+        requests.sort()
+
+        assigned_this_step = set()
+        action_info = {}
+
+        for _, robot_id, task_id in requests:
+
+            if task_id in assigned_this_step:
+                conflict_dropped_count += 1
+                continue
+
+            robot = self.robots[robot_id]
+            task = self.tasks.get(task_id)
+
+            if (
+                task is None
+                or task.get("is_assigned")
+                or task.get("is_obsolete")
+                or task.get("is_completed")
+            ):
+                invalid_action_count += 1
+                continue
+
+            if self.capacity_method == "assigned":
+                total_committed = (
+                    len(robot["onboard_tasks"])
+                    + len(robot["assigned_tasks"])
+                )
+            else:
+                total_committed = len(robot["onboard_tasks"])
+
+            if total_committed >= self.max_robot_capacity:
+                capacity_rejected_count += 1
+                continue
+
+            robot["assigned_tasks"].append(task_id)
+            task["is_assigned"] = True
+            task["assigned_robot"] = robot_id
+
+            assigned_this_step.add(task_id)
+            action_info[robot_id] = {"assigned_task": task_id}
+
+            valid_action_count += 1
+
+        # ---------------------------------------------------
+        # Per-step diagnostics
+        # ---------------------------------------------------
+        self.debug_last_invalid_action_count = invalid_action_count
+        self.debug_last_valid_action_count = valid_action_count
+        self.debug_last_conflict_dropped_count = conflict_dropped_count
+        self.debug_last_capacity_rejected_count = capacity_rejected_count
+
+        self.debug_last_noop_forced_count = step_noop_forced
+        self.debug_last_noop_chosen_count = step_noop_chosen
+        self.debug_last_had_candidates_count = step_had_candidates
+        self.debug_last_decisions_total = step_decisions
+
+        # ---------------------------------------------------
+        # Episode diagnostics
+        # ---------------------------------------------------
+        self.debug_invalid_action_count += invalid_action_count
+        self.debug_valid_action_count += valid_action_count
+        self.debug_conflict_dropped_count += conflict_dropped_count
+        self.debug_capacity_rejected_count += capacity_rejected_count
+
+        action_info["_diag"] = {
+            "invalid_action_count": invalid_action_count,
+            "valid_action_count": valid_action_count,
+            "conflict_dropped_count": conflict_dropped_count,
+            "capacity_rejected_count": capacity_rejected_count,
+            "noop_forced_count": step_noop_forced,
+            "noop_chosen_count": step_noop_chosen,
+            "had_candidates_count": step_had_candidates,
+            "decisions_total": step_decisions,
+        }
+
+        return action_info
+    def _process_actionsold(self, actions) -> Dict:
+        """
+        Uses _last_cand_task_ids from observation-time snapshot to prevent
+        index mismatch between policy output and candidate list.
+        """
+        robot_ids = sorted(self.robots.keys())
+        requests = []
+
+        invalid_action_count = 0
+        valid_action_count = 0
         conflict_dropped_count = 0
         total_action_count = 0
         capacity_rejected_count = 0
+
+        step_noop_forced = 0
+        step_noop_chosen = 0
+        step_had_candidates = 0
+        step_decisions = 0
 
         act_arr = np.asarray(actions).flatten()
 
@@ -528,8 +715,27 @@ class MultiAgentTaskEnv(gym.Env):
         #     task_id = cands[a]
         for r_idx, action in enumerate(actions):
             # total_action_count += 1
-            if int(action) == self._noop_index:
+            # print(f"Step {self.current_step}: Robot {robot_ids[r_idx]} action={action}, cands={self._last_cand_task_ids[r_idx]}, noop_index={self._noop_index}", {int(action)})
+            offered = self._last_cand_task_ids[r_idx]
+            # True if at least one task candidate exists
+            had_candidates = any(t is not None for t in offered)
+            is_noop = (int(action) == self._noop_index)
+
+            self.debug_decisions_total += 1
+
+            if had_candidates:
+                self.debug_had_candidates_count += 1
+
+            if is_noop:
+                if had_candidates:
+                    self.debug_noop_chosen_count += 1
+                else:
+                    self.debug_noop_forced_count += 1
+
                 continue
+
+            # if int(action) == self._noop_index:
+            #     continue
             if r_idx >= len(robot_ids):
                 break
             robot_id = robot_ids[r_idx]
@@ -590,7 +796,7 @@ class MultiAgentTaskEnv(gym.Env):
             task["assigned_robot"] = robot_id
             assigned_this_step.add(task_id)
             action_info[robot_id] = {"assigned_task": task_id}
-
+            print(f"Step {self.current_step}: Robot {robot_id} assigned to Task {task_id}")
         valid_action_count = len(action_info)
 
         self.debug_last_invalid_action_count = int(invalid_action_count)
@@ -945,10 +1151,10 @@ class MultiAgentTaskEnv(gym.Env):
     # =========================================================================
 
     def _compute_rewards(self, action_info) -> float:
-        W_COMP = 2.0
-        W_WAIT = 1
-        W_DEADLINE = 10.0
-        W_OBS = 0.5
+        W_COMP = self.W_COMP
+        W_WAIT = self.W_WAIT
+        W_DEADLINE = self.W_DEADLINE
+        W_OBS = self.W_OBS
 
         WAIT_CAP = max(1.0, float(self.max_wait_delay_s))
         DEADLINE_CAP = max(1.0, float(self.max_travel_delay_s))

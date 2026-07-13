@@ -643,18 +643,25 @@ def plot_training_vs_eval_reward(
     
     _save_fig(fig, out_png)
 
-def find_latest_run(seed: int) -> Path:
-    base = Path("runs") / f"seed_{seed}"
+def latest_run_id(runs_root: Path) -> Path:
+    """Most recently modified runs/run_{id}/ sweep folder."""
+    run_dirs = sorted(runs_root.glob("run_*"), key=lambda p: p.stat().st_mtime)
+    if not run_dirs:
+        raise FileNotFoundError(f"No run_* directories found in {runs_root}")
+    return run_dirs[-1]
 
-    if not base.exists():
-        raise FileNotFoundError(f"Seed folder not found: {base}")
 
-    runs = sorted(base.glob("run_*"), key=lambda p: p.stat().st_mtime)
+def find_latest_run(seed: int, run_id: str = None, runs_root: str = "runs") -> Path:
+    """Resolve runs/run_{run_id}/seed_{seed}/ (sweep-grouped layout: one
+    run_id per training session, seeds nested inside it)."""
+    root = Path(runs_root)
+    run_root = (root / f"run_{run_id}") if run_id else latest_run_id(root)
 
-    if not runs:
-        raise FileNotFoundError(f"No runs found in {base}")
-
-    return runs[-1]
+    seed_dir = run_root / f"seed_{seed}"
+    if not seed_dir.exists():
+        available = sorted(p.name for p in run_root.glob("seed_*"))
+        raise FileNotFoundError(f"No seed_{seed} under {run_root}. Available: {available}")
+    return seed_dir
 def plot_noop_and_action_diagnostics(det_data, stoch_data, out_png):
     """NOOP fraction per episode + aggregate action-index histogram."""
     fig, axes = plt.subplots(1, 2, figsize=(14, 5), facecolor="white")
@@ -851,6 +858,7 @@ def plot_mask_pressure_noop_debug(det_data, stoch_data, out_png, ma_window=5):
     _save_fig(fig, out_png)
 
 
+
 def plot_debug_summary_table(det_data, stoch_data, out_png):
     def extract(d):
         st = (d or {}).get("stats", {})
@@ -896,85 +904,461 @@ def plot_debug_summary_table(det_data, stoch_data, out_png):
     ax.set_title("Debug Summary Metrics", fontsize=14, fontweight="bold", pad=16)
     _save_fig(fig, out_png)
 
+# ================================
+# Cross-seed aggregate plots (--all-seeds)
 # ============================================================================
-# Main
-# ============================================================================
+ 
+def load_all_seed_eval_stats_summary(run_root: Path) -> Dict[int, Dict[str, Dict]]:
+    """Scan runs/run_{id}/seed_*/eval_results/debug_summary.json and return
+    {seed: {"det": stats_dict, "sto": stats_dict}} for every seed that has
+    eval results. Seeds without eval_results are skipped with a warning,
+    not silently dropped."""
+    out = {}
+    for seed_dir in sorted(run_root.glob("seed_*")):
+        summary_file = seed_dir / "eval_results" / "debug_summary.json"
+        if not summary_file.exists():
+            print(f" ⚠️ No eval results for {seed_dir.name}, skipping in cross-seed plots")
+            continue
+        data = _load_json(summary_file)
+        seed = int(seed_dir.name.replace("seed_", ""))
+        out[seed] = {"det": data.get("deterministic", {}), "sto": data.get("stochastic", {})}
+    return out
 
-def main() -> None:
-    ap = argparse.ArgumentParser(
-        description="Generate comprehensive evaluation and training plots",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+def load_all_seed_eval_stats(run_root: Path) -> Dict[int, Dict[str, Dict]]:
+    """Scan runs/run_{id}/seed_*/eval_results/debug_summary.json and return
+    {seed: {"det": stats_dict, "sto": stats_dict}} for every seed that has
+    eval results. Seeds without eval_results are skipped with a warning,
+    not silently dropped."""
+    out = {}
+    for seed_dir in sorted(run_root.glob("seed_*")):
+        summary_file = seed_dir / "eval_results" / "debug_summary.json"
+        if not summary_file.exists():
+            print(f" ⚠️ No eval results for {seed_dir.name}, skipping in cross-seed plots")
+            continue
+        data = _load_json(summary_file)
+        seed = int(seed_dir.name.replace("seed_", ""))
+        det_file = seed_dir / "eval_results" / "deterministic.json"
+        sto_file = seed_dir / "eval_results" / "stochastic.json"
+
+        det = _load_json(det_file) if det_file.exists() else {}
+        sto = _load_json(sto_file) if sto_file.exists() else {}
+
+        out[seed] = {
+            "det": det,
+            "sto": sto,
+        }
+    return out
+
+
+def plot_multi_seed_reward_comparison(seed_stats: Dict[int, Dict], baselines: Dict, out_png: Path):
+    """Bar chart: PPO Det / PPO Stoch (mean +/- std ACROSS SEEDS, i.e. seed
+    variance, not within-seed episode variance) vs each baseline (mean +/-
+    std across its own episodes, single seed since baselines aren't
+    seed-dependent). This is the plot that answers 'does PPO reliably beat
+    baselines, or did one lucky seed do all the work?'"""
+    if not seed_stats:
+        print("⚠️ No seed eval stats available for multi-seed reward comparison")
+        return
+ 
+    det_means = [s["det"].get("reward_mean", 0.0) for s in seed_stats.values() if s.get("det")]
+    sto_means = [s["sto"].get("reward_mean", 0.0) for s in seed_stats.values() if s.get("sto")]
+ 
+    labels, means, stds, colors = [], [], [], []
+ 
+    if det_means:
+        labels.append(f"PPO Det\n(n={len(det_means)} seeds)")
+        means.append(float(np.mean(det_means)))
+        stds.append(float(np.std(det_means)))
+        colors.append("#1f77b4")
+ 
+    if sto_means:
+        labels.append(f"PPO Stoch\n(n={len(sto_means)} seeds)")
+        means.append(float(np.mean(sto_means)))
+        stds.append(float(np.std(sto_means)))
+        colors.append("#2ca02c")
+ 
+    for name, cdata in (baselines or {}).items():
+        rewards = cdata.get("rewards", [])
+        if not rewards:
+            continue
+        labels.append(name)
+        means.append(float(np.mean(rewards)))
+        stds.append(float(np.std(rewards)))
+        colors.append("#888888")
+ 
+    if not means:
+        print("⚠️ Nothing to plot in multi-seed reward comparison")
+        return
+ 
+    fig, ax = plt.subplots(figsize=(9, 5.5), facecolor="white")
+    x = np.arange(len(labels))
+    ax.bar(x, means, yerr=stds, capsize=6, color=colors, alpha=0.85)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=9)
+    ax.set_ylabel("Episode reward", fontsize=11, fontweight="bold")
+    ax.set_title("Reward Across Seeds vs Baselines\n(PPO error bars = std across seeds, "
+                  "baseline error bars = std across episodes)", fontsize=12, fontweight="bold")
+    ax.grid(axis="y", alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+ 
+    # annotate individual seed dots so outlier seeds are visible, not just the bar
+    if det_means:
+        jitter = (np.random.rand(len(det_means)) - 0.5) * 0.15
+        ax.scatter(np.zeros(len(det_means)) + jitter, det_means, color="black", s=18, zorder=5, alpha=0.7)
+    if sto_means:
+        jitter = (np.random.rand(len(sto_means)) - 0.5) * 0.15
+        ax.scatter(np.ones(len(sto_means)) + jitter, sto_means, color="black", s=18, zorder=5, alpha=0.7)
+ 
+    _save_fig(fig, out_png)
+ 
+ 
+def plot_multi_seed_debug_metrics(seed_stats: Dict[int, Dict], out_png: Path):
+    """Per-seed values of the key debug metrics, side by side — makes it
+    obvious if e.g. only one seed collapsed to all-noop or blew up its
+    obsolete-penalty rate, which a single averaged number would hide."""
+    if not seed_stats:
+        print("⚠️ No seed eval stats available for multi-seed debug metrics")
+        return
+ 
+    seeds = sorted(seed_stats.keys())
+    metrics = [
+        ("noop_frac_mean", "Noop fraction"),
+        ("capacity_reject_rate", "Capacity reject rate"),
+        ("invalid_action_rate", "Invalid action rate"),
+        ("r_comp_mean", "r_comp (completion reward)"),
+        ("r_wait_mean", "r_wait (wait penalty)"),
+        ("r_obsolete_mean", "r_obsolete (obsolete penalty)"),
+    ]
+ 
+    fig, axes = plt.subplots(2, 3, figsize=(17, 8), facecolor="white")
+ 
+    for ax, (key, title) in zip(axes.flatten(), metrics):
+        det_vals = [seed_stats[s]["det"].get(key, 0.0) for s in seeds if seed_stats[s].get("det")]
+        sto_vals = [seed_stats[s]["sto"].get(key, 0.0) for s in seeds if seed_stats[s].get("sto")]
+ 
+        x = np.arange(len(seeds))
+        width = 0.35
+        if det_vals:
+            ax.bar(x - width/2, det_vals, width, label="Det", color="#1f77b4", alpha=0.85)
+        if sto_vals:
+            ax.bar(x + width/2, sto_vals, width, label="Stoch", color="#2ca02c", alpha=0.85)
+ 
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(s) for s in seeds], fontsize=8)
+        ax.set_xlabel("Seed", fontsize=9)
+        ax.set_title(title, fontsize=10, fontweight="bold")
+        ax.grid(axis="y", alpha=0.3)
+        ax.legend(fontsize=8)
+ 
+    plt.tight_layout()
+    _save_fig(fig, out_png)
+ 
+def plot_multi_seed_debug_metrics_line(seed_stats: Dict[int, Dict], out_png: Path):
+    """
+    Plot each debug metric across seeds using line plots instead of bars.
+    This makes it easy to see consistency and trends across random seeds.
+    """
+    if not seed_stats:
+        print("⚠️ No seed eval stats available for multi-seed debug metrics")
+        return
+
+    seeds = sorted(seed_stats.keys())
+
+    metrics = [
+        ("noop_frac_mean", "No-op fraction"),
+        ("noop_frac_forced", "Forced no-op rate"),
+        ("noop_frac_chosen", "Chosen no-op rate"),
+        ("chosen_noop_rate_when_available", "Chosen no-op when candidates"),
+        ("capacity_reject_rate", "Capacity reject rate"),
+        ("invalid_action_rate", "Invalid action rate"),
+        ("conflict_drop_rate", "Conflict drop rate"),
+        ("r_comp_mean", "Completion reward"),
+        ("r_wait_mean", "Wait penalty"),
+        ("r_deadline_mean", "Deadline penalty"),
+        ("r_obsolete_mean", "Obsolete penalty"),
+    ]
+
+    n_metrics = len(metrics)
+    ncols = 3
+    nrows = int(np.ceil(n_metrics / ncols))
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(5.5 * ncols, 3.8 * nrows),
+        facecolor="white",
     )
-    ap.add_argument("--run-dir", type=str, default=None,
-                help="Run directory (overrides eval-dir/baseline-dir)")
-    ap.add_argument("--seed", type=int, default=42,
-                    help="Seed used to locate latest run if run-dir not provided")
-    ap.add_argument("--eval-dir", type=str, default="eval_results",
-                   help="Directory with eval_results_*.json")
-    ap.add_argument("--baseline-dir", type=str, default="baseline_results",
-                   help="Directory with baseline_results_*.json")
-    ap.add_argument("--monitor", type=str, default="logs/monitor.csv",
-                   help="Monitor CSV from training")
-    ap.add_argument("--output-dir", type=str, default=None,
-                   help="Output directory for plots")
-    ap.add_argument("--ma-window", type=int, default=5,
-                   help="Moving average window")
+
+    axes = np.asarray(axes).reshape(-1)
+
+    for ax, (key, title) in zip(axes, metrics):
+
+        det_vals = [
+            seed_stats[s]["det"].get(key, np.nan)
+            for s in seeds
+            if seed_stats[s].get("det")
+        ]
+
+        sto_vals = [
+            seed_stats[s]["sto"].get(key, np.nan)
+            for s in seeds
+            if seed_stats[s].get("sto")
+        ]
+
+        if det_vals:
+            ax.plot(
+                seeds[:len(det_vals)],
+                det_vals,
+                marker="o",
+                linewidth=2,
+                markersize=5,
+                label="Deterministic",
+            )
+
+        if sto_vals:
+            ax.plot(
+                seeds[:len(sto_vals)],
+                sto_vals,
+                marker="s",
+                linewidth=2,
+                markersize=5,
+                label="Stochastic",
+            )
+
+        ax.set_title(title, fontsize=10, fontweight="bold")
+        ax.set_xlabel("Seed")
+        ax.grid(True, alpha=0.3)
+
+        if len(seeds) <= 15:
+            ax.set_xticks(seeds)
+
+        ax.legend(fontsize=8)
+
+    # Hide unused axes
+    for ax in axes[len(metrics):]:
+        ax.set_visible(False)
+
+    plt.tight_layout()
+    _save_fig(fig, out_png)
+
+def plot_multi_seed_reward_curves(seed_stats: Dict[int, Dict],
+                                  baselines: Dict,
+                                  out_png: Path,
+                                  ma_window: int = 5):
+    """
+    Plot evaluation reward curves for every seed together with baseline curves.
+
+    X-axis = evaluation episode
+    Y-axis = reward
+    """
+
+    if not seed_stats:
+        print("⚠️ No seed eval stats available")
+        return
+
+    fig, ax = plt.subplots(figsize=(11, 6), facecolor="white")
+
+    # ---------------- PPO deterministic ----------------
+    for seed, data in sorted(seed_stats.items()):
+        rewards = data.get("det", {}).get("rewards", [])
+        if not rewards:
+            continue
+
+        y = _moving_average(rewards, ma_window)
+        x = np.arange(len(y))
+
+        ax.plot(
+            x,
+            y,
+            lw=2,
+            alpha=0.5,
+            label=f"PPO Det (seed {seed})",
+        )
+
+    # ---------------- PPO stochastic ----------------
+    for seed, data in sorted(seed_stats.items()):
+        rewards = data.get("sto", {}).get("rewards", [])
+        if not rewards:
+            continue
+
+        y = _moving_average(rewards, ma_window)
+        x = np.arange(len(y))
+
+        ax.plot(
+            x,
+            y,
+            "--",
+            lw=2,
+            alpha=0.5,
+            label=f"PPO Sto (seed {seed})",
+        )
+
+    # ---------------- Baselines ----------------
+    baseline_styles = ["k-", "k--", "k:", "k-."]
+    style_idx = 0
+
+    for name, b in (baselines or {}).items():
+        rewards = b.get("rewards", [])
+        if not rewards:
+            continue
+
+        y = _moving_average(rewards, ma_window)
+        x = np.arange(len(y))
+
+        ax.plot(
+            x,
+            y,
+            baseline_styles[style_idx % len(baseline_styles)],
+            lw=2,
+            alpha=0.5,
+            label=name,
+        )
+
+        style_idx += 1
+
+    ax.set_xlabel("Evaluation episode", fontsize=11)
+    ax.set_ylabel("Episode reward", fontsize=11)
+    ax.set_title("Evaluation Reward Curves Across Seeds", fontsize=13, fontweight="bold")
+
+    ax.grid(alpha=0.3)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    ax.legend(fontsize=8, ncol=2)
+
+    plt.tight_layout()
+    _save_fig(fig, out_png)
+
+def plot_multi_seed_reward_curves_noBase(seed_stats: Dict[int, Dict], out_png: Path):
+    """
+    Plot evaluation reward vs evaluation episode for every seed.
+
+    One line per seed.
+    Thick black line = mean across seeds.
+    """
+    if not seed_stats:
+        print("⚠️ No seed evaluation results found.")
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5), facecolor="white")
+
+    for ax, mode_key, title in zip(
+        axes,
+        ["det", "sto"],
+        ["Deterministic", "Stochastic"],
+    ):
+
+        reward_matrix = []
+
+        for seed in sorted(seed_stats.keys()):
+
+            rewards = seed_stats[seed][mode_key].get("rewards", [])
+            if len(rewards) == 0:
+                continue
+
+            rewards = np.asarray(rewards, dtype=float)
+            reward_matrix.append(rewards)
+
+            ax.plot(
+                np.arange(1, len(rewards) + 1),
+                rewards,
+                linewidth=1.5,
+                alpha=0.6,
+                label=f"Seed {seed}",
+            )
+
+        if reward_matrix:
+            min_len = min(len(r) for r in reward_matrix)
+            reward_matrix = np.stack([r[:min_len] for r in reward_matrix])
+
+            mean_curve = reward_matrix.mean(axis=0)
+
+            ax.plot(
+                np.arange(1, min_len + 1),
+                mean_curve,
+                color="black",
+                linewidth=3,
+                label="Mean",
+            )
+
+        ax.set_title(title, fontweight="bold")
+        ax.set_xlabel("Evaluation Episode")
+        ax.set_ylabel("Reward")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8)
+
+    plt.tight_layout()
+    _save_fig(fig, out_png)
+
+
+def generate_multi_seed_plots(run_root: Path, base_dir: Path):
+    out_dir = run_root / "multi_seed_plots"
+    out_dir.mkdir(parents=True, exist_ok=True)
+ 
+    seed_stats = load_all_seed_eval_stats(run_root)
+    if not seed_stats:
+        print(f"⚠️ No per-seed eval_results found under {run_root} — "
+              f"run eval_ppo.py --all-seeds first.")
+        return
+ 
+    baseline_file = base_dir / "baseline_results_all.json"
+    baselines = load_baselines_all(baseline_file)
+ 
+    plot_multi_seed_reward_comparison(seed_stats, baselines, out_dir / "multi_seed_reward_comparison.png")
+    plot_multi_seed_debug_metrics(seed_stats, out_dir / "multi_seed_debug_metrics.png")
+    plot_multi_seed_debug_metrics_line(seed_stats, out_dir / "multi_seed_debug_metrics_all.png")
+    plot_multi_seed_reward_curves(
+    seed_stats, baselines,
+    out_dir / "multi_seed_reward_curves.png",
+)
+    print(f"✓ Cross-seed plots saved to {out_dir}\n")
+
     
-    ap.add_argument("--base-dir", type=str, default="baseline_results")
-
-     
-    args = ap.parse_args()
-
-    if args.run_dir:
-        run_dir = Path(args.run_dir)
-    else:
-        run_dir = find_latest_run(args.seed)
-
+def generate_plots_for_run(run_dir: Path, base_dir: Path, args) -> None:
     eval_dir = run_dir / "eval_results"
-    base_dir = Path(args.base_dir)
-
-    baseline_dir = run_dir / "baseline_results"
+ 
     if args.output_dir is not None:
         output_dir = Path(args.output_dir)
     else:
         output_dir = run_dir / "plots"
-
+ 
     output_dir.mkdir(parents=True, exist_ok=True)
-    print(output_dir,'output_dir')
-    print("="*80)
-    print("Generating Comprehensive Evaluation & Training Plots")
-    print("="*80 + "\n")
-
+    print(output_dir, 'output_dir')
+    print("=" * 80)
+    print(f"Generating Comprehensive Evaluation & Training Plots — {run_dir}")
+    print("=" * 80 + "\n")
+ 
     # Load evaluation results
     print("Loading evaluation results...")
     det_file = eval_dir / "deterministic.json"
     stoch_file = eval_dir / "stochastic.json"
-
+ 
     det_data = _load_json(det_file) if det_file.exists() else None
     stoch_data = _load_json(stoch_file) if stoch_file.exists() else None
-
+ 
     if det_data:
         print(f" Deterministic ({len(det_data.get('rewards', []))} episodes)")
     if stoch_data:
         print(f" Stochastic ({len(stoch_data.get('rewards', []))} episodes)")
-
+ 
     # Load baselines
     print("Loading baseline results...")
     baseline_file = base_dir / "baseline_results_all.json"
     baselines = load_baselines_all(baseline_file)
-    
+ 
     if baselines:
         print(f"Loaded {len(baselines)} baseline policies")
-
+ 
     # Load training data
     print(" Loading training data...")
     monitor_data = _load_monitor_csv(Path(run_dir) / args.monitor)
     if monitor_data["reward"]:
         print(f" Monitor CSV ({len(monitor_data['reward'])} episodes)")
-
+ 
     # Generate plots
     print(f" Generating plots {output_dir}\n")
-
+ 
     # Evaluation plots
     print("Evaluation Plots:")
     plot_eval_rewards_per_episode(det_data, stoch_data, baselines,
@@ -990,7 +1374,7 @@ def main() -> None:
                                  output_dir / "05_eval_length_distribution.png")
     plot_reward_comparison_bar(det_data, stoch_data, baselines,
                               output_dir / "06_eval_reward_comparison.png")
-
+ 
     # Training plots
     print("Training Plots:")
     plot_training_rewards(monitor_data, baselines,
@@ -1001,11 +1385,13 @@ def main() -> None:
                                 ma_window=args.ma_window)
     plot_reward_distribution(monitor_data,
                             output_dir / "09_training_reward_distribution.png")
-    plot_cumulative_reward(monitor_data,
-                          output_dir / "10_training_cumulative_reward.png")
+    # plot_cumulative_reward(monitor_data,
+    #                       output_dir / "10_training_cumulative_reward.png")
     plot_training_vs_eval_reward(monitor_data, det_data, stoch_data,
                                 output_dir / "11_training_vs_eval.png")
-    plot_noop_and_action_diagnostics(det_data, stoch_data, output_dir / "12_noop_and_action_diagnostic.png")    # Debug plots from eval_ppo extended fields
+    plot_noop_and_action_diagnostics(det_data, stoch_data, output_dir / "12_noop_and_action_diagnostic.png")
+ 
+    # Debug plots (reward components, noop split, action-quality rates)
     print("Debug Plots:")
     plot_reward_components_debug(
         det_data, stoch_data, output_dir / "13_reward_components.png", ma_window=args.ma_window
@@ -1019,22 +1405,69 @@ def main() -> None:
     plot_debug_summary_table(
         det_data, stoch_data, output_dir / "16_debug_summary_table.png"
     )
-        # Debug plots from eval_ppo extended fields
-    print("Debug Plots:")
-    plot_reward_components_debug(
-        det_data, stoch_data, output_dir / "13_reward_components.png", ma_window=args.ma_window
+ 
+    print(f"generated 16 plots in {output_dir}\n")
+ 
+ 
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description="Generate comprehensive evaluation and training plots",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    plot_action_quality_rates_debug(
-        det_data, stoch_data, output_dir / "14_action_quality_rates.png", ma_window=args.ma_window
-    )
-    plot_mask_pressure_noop_debug(
-        det_data, stoch_data, output_dir / "15_mask_pressure_noop.png", ma_window=args.ma_window
-    )
-    plot_debug_summary_table(
-        det_data, stoch_data, output_dir / "16_debug_summary_table.png"
-    )
-    print(f"generated 11 plots in {output_dir}\n")
-
-
+    ap.add_argument("--run-dir", type=str, default=None,
+                help="Explicit seed folder, e.g. runs/run_20260712_143000/seed_42 "
+                     "(overrides --run-id/--seed resolution). Ignored if --all-seeds is set.")
+    ap.add_argument("--run-id", type=str, default=None,
+                help="Sweep to plot, e.g. '20260712_143000' (runs/run_{id}/). "
+                     "Defaults to the most recently modified sweep.")
+    ap.add_argument("--seed", type=int, default=42,
+                    help="Seed to plot within the sweep (ignored if --all-seeds is set).")
+    ap.add_argument("--all-seeds", action="store_true",
+                help="Generate plots for every seed_* trained in this sweep, "
+                     "each into its own runs/run_{id}/seed_{n}/plots/, plus the "
+                     "cross-seed comparison plots in runs/run_{id}/multi_seed_plots/.")
+    ap.add_argument("--multi-seed-only", action="store_true",
+                help="Skip per-seed plots and only (re)generate the cross-seed "
+                     "comparison plots — fast when per-seed plots already exist.")
+    ap.add_argument("--eval-dir", type=str, default="eval_results",
+                   help="Directory with eval_results_*.json (relative to each run dir)")
+    ap.add_argument("--baseline-dir", type=str, default="baseline_results",
+                   help="Directory with baseline_results_*.json")
+    ap.add_argument("--monitor", type=str, default="logs/monitor.csv",
+                   help="Monitor CSV from training (relative to each run dir)")
+    ap.add_argument("--output-dir", type=str, default=None,
+                   help="Output directory for plots (ignored — per-seed subfolders "
+                        "used instead — when --all-seeds is set)")
+    ap.add_argument("--ma-window", type=int, default=5,
+                   help="Moving average window")
+    ap.add_argument("--base-dir", type=str, default="baseline_results")
+    args = ap.parse_args()
+ 
+    base_dir = Path(args.base_dir)
+ 
+    if args.all_seeds or args.multi_seed_only:
+        root = Path("runs")
+        run_root = (root / f"run_{args.run_id}") if args.run_id else latest_run_id(root)
+        seed_dirs = sorted(run_root.glob("seed_*"))
+        if not seed_dirs:
+            raise FileNotFoundError(f"No seed_* directories found in {run_root}")
+ 
+        if not args.multi_seed_only:
+            print(f"Plotting {len(seed_dirs)} seeds in {run_root}: {[d.name for d in seed_dirs]}\n")
+            for seed_dir in seed_dirs:
+                generate_plots_for_run(seed_dir, base_dir, args)
+ 
+        print("\nGenerating cross-seed comparison plots...")
+        generate_multi_seed_plots(run_root, base_dir)
+        return
+ 
+    if args.run_dir:
+        run_dir = Path(args.run_dir)
+    else:
+        run_dir = find_latest_run(args.seed, args.run_id)
+ 
+    generate_plots_for_run(run_dir, base_dir, args)
+ 
+ 
 if __name__ == "__main__":
     main()

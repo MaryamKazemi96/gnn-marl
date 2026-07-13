@@ -65,23 +65,40 @@
 #   route_slots_k: 2
 
   # GNN-PPO Training Configuration
+
 # Robot Parameters
 max_robot_capacity: 3
 max_wait_delay_s:   600.0
 max_travel_delay_s: 100.0
+movement_spee: 1.0
+capacity_method: "assigned"
+
+
+# Reward
+W_COMP: 2.0
+W_WAIT: 1.0
+W_DEADLINE: 10.0
+W_OBS: 1.0
+
 # Environment parameters
 num_robots: 6
 num_tasks: 40
-radius: 100
-
-batch_time: 180
 vicinity_m: 40
+batch_time: 180
+decision_interval: 8  # Steps between policy decisions
 
 
 # Graph parameters
 K_max: 5              # Max candidate tasks per robot
 N_max: 15             # Max nodes in ego-graph
 E_max: 50             # Max edges in ego-graph
+two_hop: false
+use_xy_pickup: false
+normalize_features: True
+use_node_type: True
+use_ego_robot: True
+use_edge_rt: True
+wo_hop_directed: False
 
 # Feature parameters
 use_xy_pickup: false
@@ -90,23 +107,26 @@ use_node_type: true
 use_ego_robot: true
 use_edge_rt: false
 
-# 2-hop parameters
-two_hop: false
-
-# Decision making
-decision_interval: 8  # Steps between policy decisions
-
 # PPO parameters
 ppo_steps: 64
 batch_size: 64
 learning_rate: 0.0003
 ent_coef: 0.003
-total_timesteps: 5000
+total_timesteps: 50000
 noop_init:   -1.0      
-
-
 max_steps: 2500
+gamma: 0.99
+clip_range: 0.2
+vf_coef: 0.5
+gae_lambda: 0.95
+n_epochs: 5
+max_grad_norm: 0.5
 
-
+# Policy Parameter
+hidden: 64
+logit_temperature: 1.0
+noop_init: -1.0
+freeze_noop_logit: false
 #experiments
-seeds: [42, 123, 456, 789, 1011]
+seeds: [42, 123, 456]
+
