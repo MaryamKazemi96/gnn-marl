@@ -304,34 +304,6 @@ def load_tensorboard_data(tb_dir: Path) -> Dict[str, Dict[str, List[float]]]:
 # Evaluation plots
 # ============================================================
 
-# def plot_eval_rewards_per_episode(det_data: Dict, stoch_data: Dict, out_png: Path, ma_window: int = 10) -> None:
-#     """Line plot of per-episode rewards for deterministic and stochastic modes."""
-#     fig, ax = plt.subplots(figsize=(14, 6), facecolor="white")
-#     ax.set_facecolor("#fafafa")
-
-#     for label, color, data in [
-#         ("PPO Deterministic", "#2980b9", det_data),
-#         ("PPO Stochastic", "#e67e22", stoch_data),
-#     ]:
-#         if data is None:
-#             continue
-#         rewards = np.asarray(data.get("rewards", []), dtype=float)
-#         if rewards.size == 0:
-#             continue
-#         episodes = np.arange(1, rewards.size + 1)
-#         ax.plot(episodes, rewards, alpha=0.2, color=color, linewidth=0.8)
-#         ax.plot(episodes, _moving_average(rewards, ma_window), lw=2.4, color=color,
-#                 label=f"{label} MA({ma_window}) – mean {rewards.mean():.2f}")
-#         ax.axhline(rewards.mean(), color=color, lw=1.5, ls="--", alpha=0.6)
-
-#     ax.set_xlabel("Episode", fontsize=11, fontweight="bold")
-#     ax.set_ylabel("Episode Reward", fontsize=11, fontweight="bold")
-#     ax.set_title("Evaluation: Per-Episode Rewards (Deterministic vs Stochastic)", fontsize=14, fontweight="bold")
-#     ax.legend(fontsize=10)
-#     ax.grid(alpha=0.25)
-#     ax.spines["top"].set_visible(False)
-#     ax.spines["right"].set_visible(False)
-#     _save_fig(fig, out_png)
 def plot_eval_rewards_per_episode(
     det_data: Dict,
     stoch_data: Dict,

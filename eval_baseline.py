@@ -24,6 +24,37 @@ from train_ppo import load_generated_data
 
 POLICIES = ["random", "greedy", "unique"]
 
+def latest_run_id(runs_root: Path) -> Path:
+    """Most recently modified runs/run_{id}/ sweep folder."""
+    run_dirs = sorted(runs_root.glob("run_*"), key=lambda p: p.stat().st_mtime)
+    if not run_dirs:
+        raise FileNotFoundError(f"No run_* directories found in {runs_root}")
+    return run_dirs[-1]
+ 
+ 
+def find_latest_run(seed: int, run_id: str = None, runs_root: str = "runs") -> Path:
+    """Resolve runs/run_{run_id}/seed_{seed}/ — layout as of the sweep-grouped
+    restructure (previously runs/seed_{seed}/run_{id}/, flipped so every seed
+    trained in one sweep lives together under a single run_id)."""
+    root = Path(runs_root)
+    run_root = (root / f"run_{run_id}") if run_id else latest_run_id(root)
+ 
+    seed_dir = run_root / f"seed_{seed}"
+    if not seed_dir.exists():
+        available = sorted(p.name for p in run_root.glob("seed_*"))
+        raise FileNotFoundError(f"No seed_{seed} under {run_root}. Available: {available}")
+    return seed_dir
+ 
+ 
+def all_seed_dirs_in_run(run_id: str = None, runs_root: str = "runs") -> List[Path]:
+    """Every seed_* directory trained in one sweep — used for --all-seeds eval."""
+    root = Path(runs_root)
+    run_root = (root / f"run_{run_id}") if run_id else latest_run_id(root)
+    seed_dirs = sorted(run_root.glob("seed_*"))
+    if not seed_dirs:
+        raise FileNotFoundError(f"No seed_* directories found in {run_root}")
+    return seed_dirs
+ 
 
 def load_config(config_path: str) -> dict:
     """Load YAML config file."""
@@ -298,7 +329,7 @@ def _concat_results(results_list: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
-def main() -> None:
+def main_one_seedd() -> None:
     ap = argparse.ArgumentParser(
         description="Evaluate baseline policies on MultiAgentTaskEnv"
     )
@@ -318,7 +349,10 @@ def main() -> None:
                     help="Shuffle robot iteration order (for unique policy)")
     ap.add_argument("--unique-shuffle-k", action="store_true",
                     help="Shuffle k scan order (for unique policy)")
-
+    ap.add_argument("--run-id",type=str, default=None,
+                    help="Run ID created by train_ppo.py")
+    ap.add_argument("--all-seeds", action="store_true",
+                help="Evaluate every seed in the selected run.")
     args = ap.parse_args()
 
     config = load_config(args.config)
@@ -444,6 +478,168 @@ def main() -> None:
     print(f"\n✓ Saved combined results to {out_dir / 'baseline_results_all.json'}")
     print(f"✓ Saved per-seed results to {out_dir / 'baseline_results_per_seed.json'}\n")
 
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description="Evaluate baseline policies on MultiAgentTaskEnv"
+    )
+    ap.add_argument("--config", type=str, default="configs/training_config.yaml",
+                    help="Path to config YAML")
+    ap.add_argument("--data-dir", type=str, default="data",
+                    help="Path to generated data directory")
+    ap.add_argument("--episodes", type=int, default=20,
+                    help="Episodes per policy per seed")
+    ap.add_argument("--seed", type=int, default=42,
+                    help="Seed to evaluate (ignored if --all-seeds)")
+    ap.add_argument("--debug", action="store_true",
+                    help="Print debug info")
+    ap.add_argument("--shuffle-robots", action="store_true",
+                    help="Shuffle robot iteration order (for unique policy)")
+    ap.add_argument("--unique-shuffle-k", action="store_true",
+                    help="Shuffle k scan order (for unique policy)")
+    ap.add_argument("--run-id", type=str, default=None,
+                    help="Run ID created by train_ppo.py (defaults to latest run)")
+    ap.add_argument("--all-seeds", action="store_true",
+                    help="Evaluate every seed in the selected run.")
 
+    args = ap.parse_args()
+
+    config = load_config(args.config)
+
+    print("=" * 80)
+    print("Loading Generated Data")
+    print("=" * 80 + "\n")
+
+    try:
+        agents, tasks_batches = load_generated_data(args.data_dir)
+        print(f"✓ Data loaded!")
+        print(f"  Robots: {len(agents)}")
+        print(f"  Batches: {len(tasks_batches)}")
+        print(f"  Tasks: {sum(len(b) for b in tasks_batches)}\n")
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        return
+
+    # -------------------------------------------------------------
+    # Determine which seed directories to evaluate
+    # -------------------------------------------------------------
+    if args.all_seeds:
+        seed_dirs = all_seed_dirs_in_run(args.run_id)
+    else:
+        seed_dirs = [find_latest_run(args.seed, args.run_id)]
+
+    for seed_dir in seed_dirs:
+
+        seed = int(seed_dir.name.replace("seed_", ""))
+        eval_dir = seed_dir / "eval_results"
+        eval_dir.mkdir(parents=True, exist_ok=True)
+
+        print("=" * 80)
+        print(f"Seed {seed} | Episodes per policy: {args.episodes}")
+        print("=" * 80 + "\n")
+
+        per_seed: Dict[str, Dict[str, Any]] = {str(seed): {}}
+        per_policy_allseeds: Dict[str, List[Dict[str, Any]]] = {
+            p: [] for p in POLICIES
+        }
+
+        for policy_name in POLICIES:
+
+            print(f"  Evaluating {policy_name}...")
+
+            try:
+                base_env = MultiAgentTaskEnv(
+                    agents=agents,
+                    tasks_batches=tasks_batches,
+                    K_max=config.get("K_max", 5),
+                    N_max=config.get("N_max", 15),
+                    E_max=config.get("E_max", 50),
+                    use_xy_pickup=config.get("use_xy_pickup", False),
+                    normalize_features=config.get("normalize_features", True),
+                    use_node_type=config.get("use_node_type", True),
+                    use_ego_robot=config.get("use_ego_robot", True),
+                    use_edge_rt=config.get("use_edge_rt", False),
+                    two_hop=config.get("two_hop", False),
+                    two_hop_directed=config.get("two_hop_directed", False),
+                    vicinity_m=config.get("vicinity_m", 20.0),
+                    max_steps=config.get("max_steps", 1000),
+                    max_robot_capacity=config.get("max_robot_capacity", 2),
+                    max_wait_delay_s=config.get("max_wait_delay_s", 600.0),
+                    max_travel_delay_s=config.get("max_travel_delay_s", 3600.0),
+                )
+            except Exception as e:
+                print(f"  Error creating environment: {e}")
+                continue
+
+            try:
+                res = evaluate_policy(
+                    env=base_env,
+                    config=config,
+                    policy_name=policy_name,
+                    n_episodes=args.episodes,
+                    seed=seed,
+                    debug=args.debug,
+                    shuffle_robots=args.shuffle_robots,
+                    unique_shuffle_k=args.unique_shuffle_k,
+                )
+
+                per_seed[str(seed)][policy_name] = res
+                per_policy_allseeds[policy_name].append(res)
+
+                # save individual policy result
+                (eval_dir / f"baseline_{policy_name}.json").write_text(
+                    json.dumps(res, indent=2)
+                )
+
+                print(
+                    f"   {policy_name}: "
+                    f"{res['stats']['reward_mean']:.2f} ± "
+                    f"{res['stats']['reward_std']:.2f}\n"
+                )
+
+            except Exception as e:
+                print(f"   Error evaluating {policy_name}: {e}")
+                import traceback
+                traceback.print_exc()
+
+            finally:
+                try:
+                    base_env.close()
+                except Exception:
+                    pass
+
+        # ---------------------------------------------------------
+        # Combined summary for this seed
+        # ---------------------------------------------------------
+        combined_results = {
+            p: _concat_results(per_policy_allseeds[p])
+            for p in POLICIES
+        }
+        combined_results["num_episodes_per_seed"] = int(args.episodes)
+        combined_results["num_seeds"] = 1
+        combined_results["seeds"] = [seed]
+
+        (eval_dir / "baseline_results_all.json").write_text(
+            json.dumps(combined_results, indent=2)
+        )
+        (eval_dir / "baseline_results_per_seed.json").write_text(
+            json.dumps(per_seed, indent=2)
+        )
+
+        print("\n" + "=" * 80)
+        print(f"Summary (Seed {seed})")
+        print("=" * 80 + "\n")
+
+        print(f"{'Policy':<12} {'Reward Mean':<15} {'Reward Std':<15} {'Completed':<15}")
+        for policy in POLICIES:
+            stats = combined_results[policy]["stats"]
+            print(
+                f"{policy:<12}"
+                f"{stats['reward_mean']:>12.2f}     "
+                f"{stats['reward_std']:>12.2f}     "
+                f"{stats['completed_mean']:>12.2f}"
+            )
+
+        print(f"\n✓ Results saved to {eval_dir}\n")
+        
 if __name__ == "__main__":
     main()

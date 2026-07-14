@@ -4,10 +4,15 @@
 set -e
 
 echo "Starting PPO training..."
-#python3 train_ppo.py --config configs/training_config.yaml
+python3 train_ppo.py --config configs/training_config.yaml
 
 echo "Evaluating baseline..."
-python3 eval_baseline.py --config configs/training_config.yaml --episodes 20 --seed 42
+python3 eval_baseline.py --config configs/training_config.yaml --episodes 20 --all-seeds
+
+echo "Starting Plot training..."
+python3 plot_training.py --seed 42
+python3 plot_training.py --seed 123
+python3 plot_training.py --seed 456
 
 echo "Evaluating PPO..."
 python3 eval_ppo.py --all-seeds --episodes 20

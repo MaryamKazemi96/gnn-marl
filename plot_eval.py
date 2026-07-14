@@ -1301,17 +1301,14 @@ def generate_multi_seed_plots(run_root: Path, base_dir: Path):
         print(f"⚠️ No per-seed eval_results found under {run_root} — "
               f"run eval_ppo.py --all-seeds first.")
         return
+    # eval_dir = run_dir / "eval_results"
+    # baseline_file = eval_dir / "baseline_results_all.json"
+    # baselines = load_baselines_all(baseline_file)
  
-    baseline_file = base_dir / "baseline_results_all.json"
-    baselines = load_baselines_all(baseline_file)
- 
-    plot_multi_seed_reward_comparison(seed_stats, baselines, out_dir / "multi_seed_reward_comparison.png")
-    plot_multi_seed_debug_metrics(seed_stats, out_dir / "multi_seed_debug_metrics.png")
-    plot_multi_seed_debug_metrics_line(seed_stats, out_dir / "multi_seed_debug_metrics_all.png")
-    plot_multi_seed_reward_curves(
-    seed_stats, baselines,
-    out_dir / "multi_seed_reward_curves.png",
-)
+    # plot_multi_seed_reward_comparison(seed_stats, baselines, out_dir / "multi_seed_reward_comparison.png")
+    # plot_multi_seed_debug_metrics(seed_stats, out_dir / "multi_seed_debug_metrics.png")
+    # plot_multi_seed_debug_metrics_line(seed_stats, out_dir / "multi_seed_debug_metrics_all.png")
+    plot_multi_seed_reward_curves_noBase(    seed_stats, out_dir / "multi_seed_reward_curves.png")
     print(f"✓ Cross-seed plots saved to {out_dir}\n")
 
     
@@ -1344,7 +1341,7 @@ def generate_plots_for_run(run_dir: Path, base_dir: Path, args) -> None:
  
     # Load baselines
     print("Loading baseline results...")
-    baseline_file = base_dir / "baseline_results_all.json"
+    baseline_file = eval_dir / "baseline_results_all.json"
     baselines = load_baselines_all(baseline_file)
  
     if baselines:

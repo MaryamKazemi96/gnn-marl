@@ -24,7 +24,7 @@ import sys
 import yaml
 from PIL import Image
 import torch as th
-
+from scipy.optimize import linear_sum_assignment
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from src.utils.ego_graph_builder import build_padded_ego_batch
@@ -134,6 +134,7 @@ class MultiAgentTaskEnv(gym.Env):
         use_true_id: bool = False,
         reward_mode: str = "new",
         capacity_method: str = "assigned",
+        conflict_resolution: str = "greedy",
         W_COMP: float = 2.0,
         W_WAIT: float = 1.0,
         W_DEADLINE: float = 10.0,
@@ -284,6 +285,12 @@ class MultiAgentTaskEnv(gym.Env):
         if self.capacity_method not in ("assigned", "pickup"):
             raise ValueError(
                 "capacity_method must be 'assigned' or 'pickup'"
+            )
+        
+        self.conflict_resolution = conflict_resolution.lower()
+        if self.conflict_resolution not in ("greedy", "random", "hungarian"):
+            raise ValueError(
+                "conflict_resolution must be 'greedy', 'random', or 'hungarian'"
             )
     # =========================================================================
     # RESET
@@ -522,6 +529,134 @@ class MultiAgentTaskEnv(gym.Env):
     # =========================================================================
     # ACTION PROCESSING
     # =========================================================================
+    # =========================================================================
+    # CONFLICT RESOLUTION
+    # =========================================================================
+    # All three resolvers take the same input — a list of (dist, robot_id,
+    # task_id) requests, already filtered so every task_id refers to a task
+    # that's real/unassigned/not obsolete/not completed at proposal time —
+    # and return a list of (robot_id, task_id) winners. Capacity checking
+    # happens in the caller (_process_actions) identically for all three, so
+    # differences in outcomes are purely about *who wins a contested task*,
+    # not about capacity semantics.
+
+    def _resolve_conflicts(self, requests):
+        if not requests:
+            return []
+        if self.conflict_resolution == "greedy":
+            return self._resolve_conflicts_greedy(requests)
+        elif self.conflict_resolution == "random":
+            return self._resolve_conflicts_random(requests)
+        elif self.conflict_resolution == "hungarian":
+            return self._resolve_conflicts_hungarian(requests)
+        else:
+            raise ValueError(f"Unknown conflict_resolution: {self.conflict_resolution}")
+
+    def _resolve_conflicts_greedy(self, requests):
+        """Original behavior: process requests in ascending-distance order;
+        first robot to claim a task wins it, later claims for the same task
+        are dropped as conflicts."""
+        ordered = sorted(requests, key=lambda r: r[0])
+        assigned_this_step = set()
+        winners = []
+        for dist, robot_id, task_id in ordered:
+            if task_id in assigned_this_step:
+                self.debug_last_conflict_dropped_count += 1
+                continue
+            assigned_this_step.add(task_id)
+            winners.append((robot_id, task_id))
+        return winners
+
+    def _resolve_conflicts_random(self, requests):
+        """Same first-come-first-served structure as greedy, but processing
+        order is a uniformly random permutation instead of ascending
+        distance — so among robots contesting the same task, the winner is
+        random rather than always the nearest one. Uses self.np_random
+        (seeded via reset(seed=...)) for reproducibility across episodes
+        run with the same seed."""
+        order = self.np_random.permutation(len(requests))
+        assigned_this_step = set()
+        winners = []
+        for idx in order:
+            dist, robot_id, task_id = requests[int(idx)]
+            if task_id in assigned_this_step:
+                self.debug_last_conflict_dropped_count += 1
+                continue
+            assigned_this_step.add(task_id)
+            winners.append((robot_id, task_id))
+        return winners
+
+    def _resolve_conflicts_hungarian(self, requests):
+        """Centralized optimal assignment via the Hungarian algorithm.
+
+        Under this action model each robot proposes exactly one task per
+        decision, so restricting Hungarian to literally-proposed (robot,
+        task) pairs would be mathematically identical to greedy (each robot
+        has only one edge in the bipartite graph, so there's no cross-task
+        tradeoff to exploit). To make this a genuinely different strategy,
+        a robot is eligible for ANY task proposed by ANY robot this round,
+        but ONLY if that task was also in the robot's own candidate list
+        this step (self._last_cand_task_ids) — so it can still only be
+        assigned something it could actually have seen/chosen under the
+        mask, just not necessarily the specific one it happened to pick.
+        The solver then finds the minimum-total-distance one-to-one
+        matching across that whole eligible set at once, instead of
+        resolving conflicts one task at a time.
+        """
+        robot_ids = sorted({r for _, r, _ in requests})
+        task_ids  = sorted({t for _, _, t in requests})
+        R, T = len(robot_ids), len(task_ids)
+        if R == 0 or T == 0:
+            return []
+
+        r_idx = {rid: i for i, rid in enumerate(robot_ids)}
+        t_idx = {tid: i for i, tid in enumerate(task_ids)}
+
+        # Map robot_id -> its own candidate task_ids this step, for the
+        # eligibility filter described above.
+        robot_ids_sorted_all = sorted(self.robots.keys())
+        own_candidates = {}
+        for rid in robot_ids:
+            try:
+                r_pos = robot_ids_sorted_all.index(rid)
+                offered = self._last_cand_task_ids[r_pos]
+            except (ValueError, IndexError):
+                offered = []
+            own_candidates[rid] = set(t for t in offered if t is not None)
+
+        INFEASIBLE = 1e9
+        cost = np.full((R, T), INFEASIBLE, dtype=np.float64)
+        for rid in robot_ids:
+            robot = self.robots[rid]
+            eligible = own_candidates[rid]
+            for tid in task_ids:
+                if tid not in eligible:
+                    continue
+                task = self.tasks.get(tid)
+                if task is None:
+                    continue
+                d = np.sqrt(
+                    (robot["x"] - task["pickup_x"]) ** 2 +
+                    (robot["y"] - task["pickup_y"]) ** 2
+                )
+                cost[r_idx[rid], t_idx[tid]] = d
+
+        row_ind, col_ind = linear_sum_assignment(cost)
+
+        winners = []
+        matched_robots = set()
+        for ri, ti in zip(row_ind, col_ind):
+            if cost[ri, ti] >= INFEASIBLE:
+                continue  # not a real eligible pairing, skip
+            winners.append((robot_ids[ri], task_ids[ti]))
+            matched_robots.add(robot_ids[ri])
+
+        # Robots that made a request but weren't matched by the solver
+        # (either genuinely infeasible or lost out in the optimal solution)
+        # count the same way an unmatched greedy/random loser would.
+        self.debug_last_conflict_dropped_count += max(0, R - len(winners))
+        return winners
+    
     def _process_actions(self, actions) -> Dict:
         """
         Uses _last_cand_task_ids from observation-time snapshot to prevent
@@ -597,8 +732,9 @@ class MultiAgentTaskEnv(gym.Env):
         # ---------------------------------------------------
         # Resolve conflicts
         # ---------------------------------------------------
-        requests.sort()
-
+        # requests.sort()
+        winners = self._resolve_conflicts(requests)
+        
         assigned_this_step = set()
         action_info = {}
 
