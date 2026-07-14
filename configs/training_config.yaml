@@ -105,11 +105,11 @@ use_ego_robot: true
 use_edge_rt: true
 
 # PPO parameters
-ppo_steps: 256
+ppo_steps: 64
 batch_size: 64
 learning_rate: 0.0003
-ent_coef: 0.003
-total_timesteps: 25000
+ent_coef: 0.008
+total_timesteps: 10000
 noop_init:   -1.0      
 max_steps: 2500
 gamma: 0.99
@@ -122,8 +122,8 @@ max_grad_norm: 0.5
 # Policy Parameter
 hidden: 128
 logit_temperature: 1.0
-noop_init: -1.0
-freeze_noop_logit: true
+noop_init: -2.0
+freeze_noop_logit: false
 #experiments
-seeds: [42, 123, 456]
+seeds: [42]
 

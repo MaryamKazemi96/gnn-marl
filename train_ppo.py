@@ -169,7 +169,51 @@ class TrainingLogCallback(BaseCallback):
                 f"r_dead:{info.get('ep_r_deadline', 0.0):7.2f} "
                 f"r_obs:{info.get('ep_r_obsolete', 0.0):7.2f}"
             )
+                # ----------------------------------------------------------
+        # Log policy logits / probabilities
+        # ----------------------------------------------------------
+        obs = self.locals.get("new_obs", None)
+        # print debug
+        probs = self.model.policy.get_action_probs(obs)
+        # print(probs[0], 'probs[0] in callback')
+        if obs is not None:
+            # obs_tensor, _ = self.model.policy.obs_to_tensor(obs)
+
+            with th.no_grad():
+                dist = self.model.policy.get_distribution(obs)
+
+                # MultiDiscrete -> list of Categorical distributions
+                categoricals = dist.distribution
+
+                entropies = []
+
+                for robot_idx, cat in enumerate(categoricals):
+
+                    probs = cat.probs.detach().cpu().numpy()
+                    logits = cat.logits.detach().cpu().numpy()
+
+                    mean_probs = probs.mean(axis=0)
+                    mean_logits = logits.mean(axis=0)
+
+                    for a in range(len(mean_probs)):
+                        self.logger.record(
+                            f"policy/robot_{robot_idx}/prob_{a}",
+                            float(mean_probs[a]),
+                        )
+
+                        self.logger.record(
+                            f"policy/robot_{robot_idx}/logit_{a}",
+                            float(mean_logits[a]),
+                        )
+
+                    entropies.append(cat.entropy().mean().item())
+
+                self.logger.record(
+                    "policy/entropy",
+                    float(np.mean(entropies)),
+                )
         return True
+
 
 class CheckpointCallback(BaseCallback):
     """Save model checkpoints — mirrors colleague's model_episode{ep}_ts{ts}.zip naming."""
@@ -372,7 +416,7 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
         model.learn(
             total_timesteps=config["total_timesteps"],
             callback=[
-                TrainingLogCallback(log_freq=100),
+                TrainingLogCallback(log_freq=5),
                 checkpoint_cb,
             ],
             reset_num_timesteps=not continue_training,

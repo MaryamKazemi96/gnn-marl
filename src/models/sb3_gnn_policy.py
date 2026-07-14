@@ -427,6 +427,7 @@ def to_numpy(x):
         if isinstance(x, th.Tensor):
             return x.detach().cpu().numpy()
         return x 
+
 class RTGNNPolicy(ActorCriticPolicy):
     """
     SB3 PPO policy for her-style ego-graph observations.
@@ -534,6 +535,29 @@ class RTGNNPolicy(ActorCriticPolicy):
 
     # ---------------- helpers ----------------
 
+    def get_distribution(self, obs):
+        obs = {k: to_numpy(v) for k, v in obs.items()}
+        obs_tensor, _ = self.obs_to_tensor(obs)
+
+        _ = self.extract_features(
+            obs_tensor,
+            features_extractor=self.features_extractor,
+        )
+        obs_b = self.features_extractor.last_obs
+
+        logits_k, _ = self._build_batch_outputs(obs_b)
+        cand_mask = obs_b["cand_mask"]
+
+        logits_full, mask_full = self._append_noop_and_mask(
+            logits_k,
+            cand_mask,
+        )
+        logits_full = logits_full.masked_fill(~mask_full, -1e9)
+
+        B = logits_full.shape[0]
+        logits_flat = logits_full.reshape(B, -1)
+
+        return self._dist_from_logits_flat(logits_flat)
     def _build_batch_outputs(self, obs_b: Dict[str, th.Tensor]) -> Tuple[th.Tensor, th.Tensor]:
         """
         Run EgoActorCritic over each batch element.
@@ -551,7 +575,20 @@ class RTGNNPolicy(ActorCriticPolicy):
         for b in range(B):
             obs_one = {k: v[b] for k, v in obs_b.items()}  # drop batch dim => [R,...]
             logits_rk, value = self.gnn_ac(obs_one)         # logits: [R,K]
+            # print debug
+            # if not hasattr(self, "_actor_debug"):
+            #     self._actor_debug = 0
+            # self._actor_debug += 1
 
+            # if self._actor_debug % 200 == 0:
+            #     print("\n========================")
+            #     print("Actor output")
+            #     print("mean :", logits_rk.mean().item())
+            #     print("std  :", logits_rk.std().item())
+            #     print("min  :", logits_rk.min().item())
+            #     print("max  :", logits_rk.max().item())
+            #     print(logits_rk)
+            # ---------
             if logits_rk.dim() != 2 or logits_rk.shape[0] != self.R or logits_rk.shape[1] != self.K:
                 raise RuntimeError(f"EgoActorCritic must return logits [R,K]={self.R,self.K}, got {tuple(logits_rk.shape)}")
 
@@ -683,12 +720,14 @@ class RTGNNPolicy(ActorCriticPolicy):
         cand_mask = obs_b["cand_mask"]                            # [B,R,K]
 
         #------------debug for candidate mask
+        # print("cand_mask:", cand_mask[0])
         # if not hasattr(self, "_mask_debug"):
         #     self._mask_debug = 0
 
         # self._mask_debug += 1
 
         # if self._mask_debug % 200 == 0:
+
         #     print("\nCandidate mask")
         # print(cand_mask[0])
 
@@ -699,18 +738,30 @@ class RTGNNPolicy(ActorCriticPolicy):
         # )
         #------------debug for candidate mask---------------
         logits_full, mask_full = self._append_noop_and_mask(logits_k, cand_mask)
+        # pribt debug
+        # probs = th.softmax(logits_full, dim=-1)
+        # print(logits_full[0], '====================')
+        # print(probs[0], '====================')
+        # -------
         logits_full = logits_full.masked_fill(~mask_full, -1e9)
 
         B = logits_full.shape[0]
         logits_flat = logits_full.reshape(B, -1)                  # [B, R*(K+1)]
+        # print(logits_flat[0].reshape(self.R, self.K+1), 'logit before logit_flat')
         dist = self._dist_from_logits_flat(logits_flat)
         actions_flat = dist.get_actions(deterministic=deterministic)  # [B, R]
-
+        # print('action flat', actions_flat)
         # Reshape for per-robot log_prob computation
         actions = actions_flat.reshape(B, self.R)
         active  = mask_full[..., :self.K].any(dim=-1)             # [B,R] — has real candidates
         log_prob, _ = self.masked_logprob_entropy(logits_full, actions, active)
-
+        # print(type(dist))
+        # print(type(dist.distribution))
+        # print(len(dist.distribution))
+        # print(type(dist.distribution[0]))
+        # print(dist.distribution[0])
+        # print(print(dist.distribution[0].logits))
+        # print(dist.distribution.probs[0], 'dist.distribution.probs[0]')
         return actions_flat, values, log_prob                      # SB3 expects flat actions
 
     def evaluate_actions(self, obs, actions):

@@ -443,7 +443,7 @@ class MultiAgentTaskEnv(gym.Env):
 
         print("=============================================\n")
     def step(self, actions):
-        # print(f"Step {self.current_step}: actions={actions}")
+        print(f"Step {self.current_step}: actions={actions}")
         action_info = self._process_actions(actions)
 
         # macro-step component accumulators
@@ -734,7 +734,7 @@ class MultiAgentTaskEnv(gym.Env):
         # ---------------------------------------------------
         # requests.sort()
         winners = self._resolve_conflicts(requests)
-        
+
         assigned_this_step = set()
         action_info = {}
 
@@ -808,7 +808,7 @@ class MultiAgentTaskEnv(gym.Env):
             "had_candidates_count": step_had_candidates,
             "decisions_total": step_decisions,
         }
-
+        print(step_noop_chosen, step_noop_forced, step_had_candidates, step_decisions)
         return action_info
     def _process_actionsold(self, actions) -> Dict:
         """
