@@ -550,14 +550,15 @@ def main() -> None:
                 base_env = MultiAgentTaskEnv(
                     agents=agents,
                     tasks_batches=tasks_batches,
-                    K_max=config.get("K_max", 5),
-                    N_max=config.get("N_max", 15),
-                    E_max=config.get("E_max", 50),
+                    K_max=config["K_max"],
+                    N_max=config["N_max"],
+                    E_max=config["E_max"],
                     use_xy_pickup=config.get("use_xy_pickup", False),
                     normalize_features=config.get("normalize_features", True),
                     use_node_type=config.get("use_node_type", True),
                     use_ego_robot=config.get("use_ego_robot", True),
                     use_edge_rt=config.get("use_edge_rt", False),
+                    edge_features=config.get("edge_features"),
                     two_hop=config.get("two_hop", False),
                     two_hop_directed=config.get("two_hop_directed", False),
                     vicinity_m=config.get("vicinity_m", 20.0),
@@ -565,6 +566,14 @@ def main() -> None:
                     max_robot_capacity=config.get("max_robot_capacity", 2),
                     max_wait_delay_s=config.get("max_wait_delay_s", 600.0),
                     max_travel_delay_s=config.get("max_travel_delay_s", 3600.0),
+                    decision_interval=config.get("decision_interval", 8),
+                    movement_speed=config.get("movement_speed", 1.0),
+                    capacity_method=config.get("capacity_method", "assigned"),
+                    W_COMP=config.get("W_COMP", 2.0),
+                    W_WAIT=config.get("W_WAIT", 1.0),
+                    W_DEADLINE=config.get("W_DEADLINE", 10.0),
+                    W_OBS=config.get("W_OBS", 1.0),
+                    conflict_resolution=config.get("conflict_resolution", "greedy"),
                 )
             except Exception as e:
                 print(f"  Error creating environment: {e}")

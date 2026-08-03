@@ -443,7 +443,7 @@ class MultiAgentTaskEnv(gym.Env):
 
         print("=============================================\n")
     def step(self, actions):
-        print(f"Step {self.current_step}: actions={actions}")
+        # print(f"Step {self.current_step}: actions={actions}")
         action_info = self._process_actions(actions)
 
         # macro-step component accumulators
@@ -488,7 +488,21 @@ class MultiAgentTaskEnv(gym.Env):
         
         obs = self._build_observation()
         mask = self.action_mask()
+        # if terminated or truncated:
+            # print({
+                
+            #     "candidate_ratio":
+            #         self.debug_had_candidates_count /
+            #         max(1, self.debug_decisions_total),
 
+            #     "chosen_noop_when_candidate":
+            #         self.debug_noop_chosen_count /
+            #         max(1, self.debug_had_candidates_count),
+
+            #     "forced_noop_ratio":
+            #         self.debug_noop_forced_count /
+            #         max(1, self.debug_decisions_total),
+            # })
         info = {
             "action_mask": mask,
             "step": self.current_step,
@@ -681,6 +695,7 @@ class MultiAgentTaskEnv(gym.Env):
                 break
 
             offered = self._last_cand_task_ids[r_idx]
+            # print(f"Step {self.current_step}: Robot {robot_ids[r_idx]} action={action}, cands={offered}, noop_index={self._noop_index}")
             had_candidates = any(t is not None for t in offered)
             is_noop = (int(action) == self._noop_index)
 
@@ -733,16 +748,57 @@ class MultiAgentTaskEnv(gym.Env):
         # Resolve conflicts
         # ---------------------------------------------------
         # requests.sort()
+        # print(f"Step {self.current_step}: {len(requests)} , {requests},requests before conflict resolution")
         winners = self._resolve_conflicts(requests)
 
         assigned_this_step = set()
         action_info = {}
+        # print(assigned_this_step, winners, "winners after conflict resolution")
+        # for _, robot_id, task_id in requests:
 
-        for _, robot_id, task_id in requests:
+        #     if task_id in assigned_this_step:
+        #         conflict_dropped_count += 1
+        #         continue
 
-            if task_id in assigned_this_step:
-                conflict_dropped_count += 1
-                continue
+        #     robot = self.robots[robot_id]
+        #     task = self.tasks.get(task_id)
+
+        #     if (
+        #         task is None
+        #         or task.get("is_assigned")
+        #         or task.get("is_obsolete")
+        #         or task.get("is_completed")
+        #     ):
+        #         invalid_action_count += 1
+        #         continue
+
+        #     if self.capacity_method == "assigned":
+        #         total_committed = (
+        #             len(robot["onboard_tasks"])
+        #             + len(robot["assigned_tasks"])
+        #         )
+        #     else:
+        #         total_committed = len(robot["onboard_tasks"])
+
+        #     if total_committed >= self.max_robot_capacity:
+        #         capacity_rejected_count += 1
+        #         continue
+
+        #     robot["assigned_tasks"].append(task_id)
+        #     task["is_assigned"] = True
+        #     task["assigned_robot"] = robot_id
+
+        #     assigned_this_step.add(task_id)
+        #     print(assigned_this_step)
+        #     action_info[robot_id] = {"assigned_task": task_id}
+        #     print(f"Step {self.current_step}: Robot {robot_id} assigned to task {task_id}")
+        #     valid_action_count += 1
+        assigned_this_step = set()
+        action_info = {}
+
+        winner_set = set(winners)
+
+        for robot_id, task_id in winners:
 
             robot = self.robots[robot_id]
             task = self.tasks.get(task_id)
@@ -773,10 +829,13 @@ class MultiAgentTaskEnv(gym.Env):
             task["assigned_robot"] = robot_id
 
             assigned_this_step.add(task_id)
-            action_info[robot_id] = {"assigned_task": task_id}
+
+            action_info[robot_id] = {
+                "assigned_task": task_id
+            }
 
             valid_action_count += 1
-
+        conflict_dropped_count = len(requests) - len(winners)
         # ---------------------------------------------------
         # Per-step diagnostics
         # ---------------------------------------------------
@@ -808,7 +867,7 @@ class MultiAgentTaskEnv(gym.Env):
             "had_candidates_count": step_had_candidates,
             "decisions_total": step_decisions,
         }
-        print(step_noop_chosen, step_noop_forced, step_had_candidates, step_decisions)
+        # print(step_noop_chosen, step_noop_forced, step_had_candidates, step_decisions)
         return action_info
     def _process_actionsold(self, actions) -> Dict:
         """

@@ -288,7 +288,7 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
             use_ego_robot=config.get("use_ego_robot", True),
             use_edge_rt=config.get("use_edge_rt", False),
             edge_features=config.get("edge_features"),
-            two_hop=two_hop,
+            two_hop=config.get("two_hop", False),
             two_hop_directed=config.get("two_hop_directed", False),
             vicinity_m=config.get("vicinity_m", 20.0),
             max_steps=config.get("max_steps", 1000),
@@ -407,7 +407,7 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
     print("=" * 80 + "\n")
 
     checkpoint_cb = CheckpointCallback(
-        save_freq=config.get("checkpoint_freq", 10000),
+        save_freq=config.get("checkpoint_freq", 50000),
         save_path=str(model_dir),
     )
 
@@ -416,7 +416,7 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
         model.learn(
             total_timesteps=config["total_timesteps"],
             callback=[
-                TrainingLogCallback(log_freq=5),
+                TrainingLogCallback(log_freq=100),
                 checkpoint_cb,
             ],
             reset_num_timesteps=not continue_training,
