@@ -432,19 +432,12 @@ class RTGNNPolicy(ActorCriticPolicy):
         return values
 
     @th.no_grad()
-    def get_action_probs(self, obs: Any) -> np.ndarray:
-        """Diagnostic helper — NOT used by training/predict(), only for
-        inspecting the actual per-robot categorical distribution (softmax
-        over K_max real candidates + 1 noop slot) that deterministic/
-        stochastic action selection is drawn from.
-
-        Returns probs with shape [B, R, K_max+1], softmax-normalized over
-        the last axis, with masked-out (invalid) candidate slots at ~0
-        probability (since their logits were set to -1e9 before softmax,
-        same as in forward()/evaluate_actions() — this method reuses that
-        exact same masked logit computation so the numbers reported here
-        are guaranteed to match what deterministic()/sampling actually see).
-        """
+    @th.no_grad()
+    def _get_masked_logits(self, obs: Any) -> th.Tensor:
+        """Shared internal computation for get_action_probs/get_action_logits —
+        identical masked-logit path used by forward()/evaluate_actions().
+        Returns logits_full [B, R, K_max+1], with invalid (masked-out)
+        candidate slots set to -1e9 (same convention as training)."""
         obs = {
             k: to_numpy(v)
             for k, v in obs.items()
@@ -458,10 +451,141 @@ class RTGNNPolicy(ActorCriticPolicy):
         cand_mask = obs_b["cand_mask"]                            # [B,R,K]
         logits_full, mask_full = self._append_noop_and_mask(logits_k, cand_mask)  # [B,R,K+1]
         logits_full = logits_full.masked_fill(~mask_full, -1e9)
+        return logits_full
 
+    @th.no_grad()
+    def get_action_logits(self, obs: Any) -> np.ndarray:
+        """Diagnostic helper — raw (pre-softmax) logits, shape [B, R, K_max+1].
+        Masked-out (invalid) candidate slots are set to -1e9, matching the
+        exact masking used in forward()/evaluate_actions() — filter those
+        out using cand_mask before computing statistics (e.g. mean/spread),
+        since -1e9 entries would otherwise dominate any naive average.
+        """
+        logits_full = self._get_masked_logits(obs)
+        return logits_full.cpu().numpy()
+
+    @th.no_grad()
+    def get_action_probs(self, obs: Any) -> np.ndarray:
+        """Diagnostic helper — NOT used by training/predict(), only for
+        inspecting the actual per-robot categorical distribution (softmax
+        over K_max real candidates + 1 noop slot) that deterministic/
+        stochastic action selection is drawn from.
+
+        Returns probs with shape [B, R, K_max+1], softmax-normalized over
+        the last axis, with masked-out (invalid) candidate slots at ~0
+        probability (since their logits were set to -1e9 before softmax,
+        same as in forward()/evaluate_actions() — this method reuses that
+        exact same masked logit computation so the numbers reported here
+        are guaranteed to match what deterministic()/sampling actually see).
+        """
+        logits_full = self._get_masked_logits(obs)
         probs = th.softmax(logits_full, dim=-1)  # [B, R, K+1]
         return probs.cpu().numpy()
 
     def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
         actions, _values, _log_prob = self.forward(observation, deterministic=deterministic)
         return actions
+
+
+def compute_noop_logit_stats(policy: "RTGNNPolicy", obs: Any):
+    """Shared helper for training-time and eval-time logit/probability
+    logging (noop vs best-real-candidate summary). Given a batched obs
+    dict (any batch size), returns aggregate stats across every
+    (batch, robot) decision that had >=1 real candidate available (i.e.
+    noop was a genuine choice, not forced), or None if no such decisions
+    exist in this batch."""
+    probs = policy.get_action_probs(obs)    # [B,R,K+1]
+    logits = policy.get_action_logits(obs)  # [B,R,K+1]
+    cand_mask = np.asarray(obs["cand_mask"]).astype(bool)  # [B,R,K]
+    K = cand_mask.shape[-1]
+
+    has_real = cand_mask.any(axis=-1)  # [B,R]
+    if not has_real.any():
+        return None
+
+    p_noop_all = probs[..., K]
+    l_noop_all = logits[..., K]
+
+    masked_p_real = np.where(cand_mask, probs[..., :K], -np.inf)
+    masked_l_real = np.where(cand_mask, logits[..., :K], -np.inf)
+    p_real_sum_all = np.where(cand_mask, probs[..., :K], 0.0).sum(axis=-1)
+    p_best_real_all = masked_p_real.max(axis=-1)
+    l_best_real_all = masked_l_real.max(axis=-1)
+
+    p_noop = p_noop_all[has_real]
+    l_noop = l_noop_all[has_real]
+    p_real_sum = p_real_sum_all[has_real]
+    p_best_real = p_best_real_all[has_real]
+    l_best_real = l_best_real_all[has_real]
+
+    overall_max_prob = probs[has_real].max(axis=-1)
+    is_plurality = np.isclose(p_noop, overall_max_prob)
+    is_majority = p_noop > 0.5
+
+    valid_mask_full = np.concatenate([cand_mask, np.ones_like(cand_mask[..., :1])], axis=-1)
+    logits_masked_full = np.where(valid_mask_full, logits, np.nan)[has_real]
+    overall_max_logit = np.nanmax(logits_masked_full, axis=-1)
+    overall_mean_logit = np.nanmean(logits_masked_full, axis=-1)
+
+    return {
+        "n": int(has_real.sum()),
+        "p_noop_mean": float(p_noop.mean()),
+        "p_best_real_mean": float(p_best_real.mean()),
+        "p_real_sum_mean": float(p_real_sum.mean()),
+        "logit_noop_mean": float(l_noop.mean()),
+        "logit_best_real_mean": float(l_best_real.mean()),
+        "logit_gap_mean": float((l_noop - l_best_real).mean()),
+        "noop_plurality_rate": float(is_plurality.mean()),
+        "noop_majority_rate": float(is_majority.mean()),
+        "overall_max_logit_mean": float(overall_max_logit.mean()),
+        "overall_mean_logit_mean": float(overall_mean_logit.mean()),
+    }
+
+
+def compute_all_action_logit_stats(policy: "RTGNNPolicy", obs: Any, K_max: int):
+    """'Logits of all actions' — per-CANDIDATE-RANK mean logit, plus noop.
+    Unlike compute_noop_logit_stats (which only tracks the single best real
+    candidate vs noop), this ranks each decision's real-candidate logits
+    descending and tracks rank 0 (best), rank 1 (2nd best), ... rank K-1
+    separately, so you can see the whole shape of the action distribution
+    over training, not just the noop-vs-winner margin. A decision only
+    contributes to rank i if it actually had >=i+1 valid candidates that
+    step (fewer candidates just means fewer ranks get a contribution from
+    that particular decision, tracked via a per-rank count for correct
+    weighted averaging).
+
+    Returns dict with:
+      "noop_logit_mean": float
+      "rank_logit_means": list[float] of length K_max (NaN-safe: rank i is
+          None if no decision in this batch ever had that many candidates)
+      "rank_counts": list[int] of length K_max
+    """
+    logits = policy.get_action_logits(obs)  # [B,R,K+1]
+    cand_mask = np.asarray(obs["cand_mask"]).astype(bool)  # [B,R,K]
+    K = cand_mask.shape[-1]
+    assert K == K_max, f"K_max mismatch: obs has {K}, expected {K_max}"
+
+    l_noop = logits[..., K]
+    has_real = cand_mask.any(axis=-1)
+    noop_logit_mean = float(l_noop[has_real].mean()) if has_real.any() else None
+
+    cand_logits = logits[..., :K]  # [B,R,K]
+    masked = np.where(cand_mask, cand_logits, -np.inf)
+    # sort each decision's valid candidate logits descending, pad invalid
+    # slots to -inf so they sort to the end and don't pollute real ranks
+    sorted_desc = -np.sort(-masked, axis=-1)  # [B,R,K], descending
+
+    rank_means = []
+    rank_counts = []
+    for rank in range(K_max):
+        col = sorted_desc[..., rank]
+        valid = np.isfinite(col)
+        count = int(valid.sum())
+        rank_counts.append(count)
+        rank_means.append(float(col[valid].mean()) if count > 0 else None)
+
+    return {
+        "noop_logit_mean": noop_logit_mean,
+        "rank_logit_means": rank_means,
+        "rank_counts": rank_counts,
+    }
