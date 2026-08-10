@@ -412,6 +412,23 @@
 #             model = PPO.load(latest_path, env=env, device=device)
 #             model.num_timesteps = int(last_ts)
 #             print(f"  ✓ Resuming from episode {last_ep}, timestep {last_ts}")
+
+#             # PPO.load() restores noop_logit exactly as it was pickled —
+#             # including requires_grad — WITHOUT re-reading the current
+#             # config's freeze_noop_logit/noop_init. Without this, a
+#             # checkpoint originally trained with freeze_noop_logit=True
+#             # stays frozen forever no matter what the yaml says on later
+#             # --continue-training resumes. Re-derive it here from the live
+#             # config every time instead of trusting the pickled state.
+#             want_freeze = bool(config.get("freeze_noop_logit", False))
+#             current_freeze = not model.policy.noop_logit.requires_grad
+#             if current_freeze != want_freeze:
+#                 print(f"  ⚠️  noop_logit requires_grad mismatch after load: "
+#                       f"checkpoint had freeze={current_freeze}, config wants freeze={want_freeze}. "
+#                       f"Fixing to match config.")
+#                 model.policy.noop_logit.requires_grad_(not want_freeze)
+#             print(f"  noop_logit: value={model.policy.noop_logit.item():.4f} "
+#                   f"requires_grad={model.policy.noop_logit.requires_grad}")
 #         else:
 #             model = PPO(
 #                 RTGNNPolicy,
@@ -440,10 +457,18 @@
 #             missing = actor_ids - opt_ids
 #             assert not missing, f"{len(missing)} actor params NOT in optimizer — this is the bug"
 #             print(f"actor params: {len(actor_ids)}, in optimizer: {len(actor_ids & opt_ids)}")
-
+#             # print(policy_kwargs)
+#             print(f"{'noop_logit':40s} requires_grad={model.policy.noop_logit.requires_grad} "
+#       f"shape={tuple(model.policy.noop_logit.shape)} value={model.policy.noop_logit.item():.4f}")
 #             print("\n=== ACTOR PARAMETERS ===")
 #             for name, p in model.policy.gnn_ac.named_parameters():
 #                 print(f"{name:40s} requires_grad={p.requires_grad} shape={tuple(p.shape)}")
+#             # noop_logit lives directly on the policy, not under gnn_ac —
+#             # the loop above never actually reaches it. Print it explicitly
+#             # so requires_grad is verifiable from the log instead of only
+#             # inferable from a flat plot after the fact.
+#             print(f"{'noop_logit':40s} requires_grad={model.policy.noop_logit.requires_grad} "
+#                   f"shape={tuple(model.policy.noop_logit.shape)} value={model.policy.noop_logit.item():.4f}")
 #             print("========================\n")
 
 
@@ -861,11 +886,16 @@ class TrainingLogCallback(BaseCallback):
         # noop_logit.log (one line per rollout), so you can see directly
         # whether/how the noop bias moves over training, whether or not
         # freeze_noop_logit is set.
+        #
+        # 8 decimal places deliberately: with lr~3e-4 and possibly
+        # near-cancelling advantage-weighted gradients, real movement can
+        # sit in the 4th-5th decimal — invisible at the default float
+        # precision and on a plot whose y-axis spans several full units.
         if self.noop_log_path:
             noop_logit_value = float(self.model.policy.noop_logit.item())
             os.makedirs(os.path.dirname(os.path.abspath(self.noop_log_path)) or ".", exist_ok=True)
             with open(self.noop_log_path, "a") as f:
-                f.write(f"episode={self.ep_idx}, ts={self.num_timesteps}, noop_logit={noop_logit_value}\n")
+                f.write(f"episode={self.ep_idx}, ts={self.num_timesteps}, noop_logit={noop_logit_value:.8f}\n")
 
 
 class CheckpointCallback(BaseCallback):
@@ -1049,9 +1079,7 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
             missing = actor_ids - opt_ids
             assert not missing, f"{len(missing)} actor params NOT in optimizer — this is the bug"
             print(f"actor params: {len(actor_ids)}, in optimizer: {len(actor_ids & opt_ids)}")
-            # print(policy_kwargs)
-            print(f"{'noop_logit':40s} requires_grad={model.policy.noop_logit.requires_grad} "
-      f"shape={tuple(model.policy.noop_logit.shape)} value={model.policy.noop_logit.item():.4f}")
+
             print("\n=== ACTOR PARAMETERS ===")
             for name, p in model.policy.gnn_ac.named_parameters():
                 print(f"{name:40s} requires_grad={p.requires_grad} shape={tuple(p.shape)}")
@@ -1078,6 +1106,14 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
         print(f"Error creating model: {e}")
         traceback.print_exc()
         return
+
+    # Only needed for conflict_resolution='hungarian_bids' (see
+    # RTGNNPolicy.forward() and env.set_pending_logits() docstrings) — a
+    # no-op for every other resolver, since the policy checks for None
+    # before ever touching it.
+    if config.get("conflict_resolution") == "hungarian_bids":
+        model.policy._bid_env = model.env
+        print("  ✓ Wired model.policy._bid_env for hungarian_bids conflict resolution")
 
     # ── Training ──────────────────────────────────────────────────────────────
     print("\n" + "=" * 80)
@@ -1166,6 +1202,10 @@ def main():
                          help="Reuse an existing runs/run_{id}/ folder (e.g. to add seeds to "
                               "a previous sweep or resume with --continue-training). "
                               "Defaults to a fresh UTC timestamp.")
+    parser.add_argument("--conflict-resolution", type=str, default=None,
+                         choices=["greedy", "random", "hungarian", "hungarian_bids"],
+                         help="Override config's conflict_resolution without editing the yaml — "
+                              "for sweeping resolvers from a shell script.")
     args = parser.parse_args()
 
     continue_training = args.continue_training
@@ -1177,6 +1217,10 @@ def main():
     config = load_config(args.config)
     if config is None:
         raise FileNotFoundError(f"Could not load config: {args.config}")
+
+    if args.conflict_resolution is not None:
+        config["conflict_resolution"] = args.conflict_resolution
+        print(f"Overriding conflict_resolution -> {args.conflict_resolution}\n")
 
     seeds = [args.seed] if args.seed is not None else get_seed_list(config)
     run_id = args.run_id or datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
