@@ -1222,7 +1222,7 @@ def main():
                               "a previous sweep or resume with --continue-training). "
                               "Defaults to a fresh UTC timestamp.")
     parser.add_argument("--conflict-resolution", type=str, default=None,
-                         choices=["greedy", "random", "hungarian", "hungarian_bids", "capacity", "closest_than_capacity"],
+                         choices=["greedy", "random", "hungarian", "hungarian_bids", "capacity", "closest_than_capacity", "predicted_reward", "predicted_reward_joint"],
                          help="Override config's conflict_resolution without editing the yaml — "
                               "for sweeping resolvers from a shell script.")
     args = parser.parse_args()

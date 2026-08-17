@@ -970,7 +970,7 @@ def main():
                     help="Optional override output dir (defaults to run_dir/eval_results). "
                          "Ignored (per-seed subfolders used instead) when --all-seeds is set.")
     ap.add_argument("--conflict-resolution", type=str, default=None,
-                     choices=["greedy", "random", "hungarian", "hungarian_bids", "capacity", "closest_than_capacity"],
+                     choices=["greedy", "random", "hungarian", "hungarian_bids", "capacity", "closest_than_capacity", "predicted_reward", "predicted_reward_joint"],
                      help="Evaluate under a DIFFERENT resolver than this run was trained "
                           "with (overrides the run's own saved config). Default: use "
                           "whatever the run actually trained under.")

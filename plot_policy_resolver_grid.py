@@ -14,9 +14,12 @@ aggregated across seeds.
 
 Usage:
     python3 plot_policy_resolver_grid.py \\
-        --resolver greedy:20260803_140000/greedy \\
+        --resolver capacity:20260803_140000/capacity \\
+        --resolver closest_than_capacity:20260803_140000/closest_than_capacity \\
         --resolver random:20260803_140000/random \\
         --resolver hungarian:20260803_140000/hungarian \\
+        --resolver predicted_reward:20260803_140000/predicted_reward \\
+        --resolver predicted_reward_joint:20260803_140000/predicted_reward_joint \\
         --output policy_resolver_comparison.png
 """
 
@@ -36,15 +39,18 @@ from plot_eval import load_baselines_all
 # (colorblind-safe palette) where names overlap; extra resolvers (e.g.
 # hungarian_bids, which the reference doesn't have since it's PPO-only)
 # get appended with additional colors from the same palette family.
-RESOLVER_ORDER_BASE = ["capacity", "closest_then_capacity", "greedy", "random",
+RESOLVER_ORDER_BASE = ["capacity", "closest_than_capacity", "greedy", "random",
                         "predicted_reward", "predicted_reward_joint", "hungarian", "hungarian_bids"]
 RESOLVER_COLOR_MAP = {
     "capacity": "#0072B2",
-    "closest_then_capacity": "#56B4E9",
+    "closest_then_capacity": "#56B4E9",  # kept for exact-name compatibility with the reference's spelling
+    "closest_than_capacity": "#56B4E9",  # this repo's actual spelling
     "greedy": "#56B4E9",       # this repo's "greedy" (nearest-first) plays
                                 # the same structural role as the
-                                # reference's "closest_then_capacity"
-    "random": "#0072B2",
+                                # reference's "closest_than_capacity"
+    "random": "#F0E442",       # not one of the reference's 5 charted
+                                # resolvers at all — given its own color
+                                # rather than colliding with 'capacity'
     "predicted_reward": "#009E73",
     "predicted_reward_joint": "#E69F00",
     "hungarian": "#D55E00",
@@ -103,129 +109,24 @@ def resolver_color(name: str, fallback_palette: list, used: dict) -> str:
             used[name] = c
             return c
     return fallback_palette[len(used) % len(fallback_palette)]
-def plot_grouped_bars(policy_data: dict, out_path: Path,
-                      title: str = "Reward by policy and resolver"):
-    """policy_data: {resolver_name: {policy_name: {"reward_mean":, "reward_std":}}}"""
 
-    all_policies = sorted({
-        p for rdata in policy_data.values()
-        for p in rdata
-    })
 
-    resolvers = ordered_resolvers(list(policy_data.keys()))
-
-    # One fixed color per resolver
-    colorblind_palette = [
-        "#0072B2",  # blue
-        "#E69F00",  # orange
-        "#009E73",  # green
-        "#CC79A7",  # purple
-    ]
-
-    colors = {
-        resolver: colorblind_palette[i]
-        for i, resolver in enumerate(resolvers)
-    }
-
-    print("Resolver colors:")
-    for resolver in resolvers:
-        print(f"  {resolver}: {colors[resolver]}")
-
-    positions = list(range(len(all_policies)))
-
-    offsets = [
-        (i - (len(resolvers) - 1) / 2.0) * GROUPED_BAR_WIDTH
-        for i in range(len(resolvers))
-    ]
-
-    fig_width = max(9.0, 0.9 * len(all_policies) + 2.0)
-    fig, ax = plt.subplots(figsize=(fig_width, 5.6))
-
-    for i, resolver in enumerate(resolvers):
-
-        rdata = policy_data.get(resolver, {})
-
-        means = [
-            rdata.get(p, {}).get("reward_mean", math.nan)
-            for p in all_policies
-        ]
-
-        stds = [
-            rdata.get(p, {}).get("reward_std", 0.0)
-            for p in all_policies
-        ]
-
-        shifted = [
-            pos + offsets[i]
-            for pos in positions
-        ]
-
-        ax.bar(
-            shifted,
-            means,
-            width=GROUPED_BAR_WIDTH,
-            yerr=stds,
-            capsize=2.5,
-            label=resolver,
-            color=colors[resolver],
-            edgecolor="#2F3E4E",
-            alpha=0.9,
-            linewidth=0.6,
-            error_kw={
-                "elinewidth": 0.8,
-                "capthick": 0.8
-            },
-        )
-
-    ax.set_xticks(positions)
-    ax.set_xticklabels(
-        all_policies,
-        rotation=43,
-        ha="right"
-    )
-
-    ax.set_ylabel("Reward", fontsize=11)
-    ax.grid(
-        axis="y",
-        alpha=0.2,
-        linestyle="-",
-        linewidth=0.8
-    )
-    ax.set_axisbelow(True)
-
-    fig.suptitle(title, fontsize=14)
-
-    ax.legend(
-        title="Resolver",
-        fontsize=10,
-        title_fontsize=10,
-        loc="upper left",
-        bbox_to_anchor=(1.01, 1.0),
-        frameon=False,
-    )
-
-    fig.tight_layout(
-        rect=(0.0, 0.0, 0.84, 0.93)
-    )
-
-    fig.savefig(
-        out_path,
-        dpi=200,
-        bbox_inches="tight"
-    )
-
-    plt.close(fig)
-
-    print(f"✓ {out_path}")
-
-def plot_grouped_bars2(policy_data: dict, out_path: Path, title: str = "Reward by policy and resolver"):
+def plot_grouped_bars(policy_data: dict, out_path: Path, title: str = "Reward by policy and resolver"):
     """policy_data: {resolver_name: {policy_name: {"reward_mean":, "reward_std":}}}"""
     all_policies = sorted({p for rdata in policy_data.values() for p in rdata})
     resolvers = ordered_resolvers(list(policy_data.keys()))
 
+    # Fallback palette only used for resolver names NOT in RESOLVER_COLOR_MAP
+    # (i.e. genuinely new/unknown resolvers) — every resolver this repo
+    # currently supports has a fixed, semantically-consistent color from
+    # the map above, so this only kicks in for future additions.
     colorblind_palette = ["#0072B2", "#56B4E9", "#009E73", "#E69F00", "#CC79A7", "#F0E442", "#D55E00"]
     used_colors = {}
     colors = {r: resolver_color(r, colorblind_palette, used_colors) for r in resolvers}
+
+    print("Resolver colors:")
+    for resolver in resolvers:
+        print(f"  {resolver}: {colors[resolver]}")
 
     positions = list(range(len(all_policies)))
     offsets = [(i - (len(resolvers) - 1) / 2.0) * GROUPED_BAR_WIDTH for i in range(len(resolvers))]
@@ -262,7 +163,7 @@ def plot_grouped_bars2(policy_data: dict, out_path: Path, title: str = "Reward b
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--resolver", action="append", required=True,
-                     help="name:run_id, repeatable. e.g. --resolver greedy:20260803_140000/greedy")
+                     help="name:run_id, repeatable. e.g. --resolver hungarian:20260803_140000/hungarian")
     ap.add_argument("--runs-root", type=str, default="runs")
     ap.add_argument("--output", type=str, default="policy_resolver_comparison.png")
     ap.add_argument("--title", type=str, default="Reward by policy and resolver")

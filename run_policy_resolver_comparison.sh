@@ -6,9 +6,11 @@
 # your colleague's slides. Baselines only — no PPO training needed, since
 # every baseline policy here is a fixed heuristic, not a trained model.
 #
-# For each resolver, evaluates ALL baseline policies (random, greedy,
-# unique, pickup_deadline, pickup_deadline_distance) across every seed in
-# $SEEDS, then plots them all together with plot_policy_resolver_grid.py.
+# For each resolver, evaluates ALL baseline policies currently implemented
+# (random, greedy, unique, pickup_deadline, pickup_deadline_distance,
+# predicted_reward, predicted_reward_joint — eval_baseline.py's POLICIES
+# list, no need to enumerate them here) across every seed in $SEEDS, then
+# plots them all together with plot_policy_resolver_grid.py.
 
 set -e
 
@@ -21,14 +23,15 @@ EPISODES=50
 SEEDS=(42 123)
 # SEEDS+=(456)
 
-# Resolver names as they appear in the reference repo's chart legend.
-# 'greedy' is deliberately excluded here even though your environment
-# supports it — it's an alias for the exact same code path as
-# 'closest_than_capacity' (see environment.py's _resolve_conflicts()), so
-# running both would just duplicate compute for identical results.
-# 'hungarian_bids' is excluded too since it requires a trained policy's
-# logits as bids, which baselines don't have.
-RESOLVERS=(capacity closest_than_capacity random hungarian)
+# Every resolver baselines can meaningfully run under.
+# 'greedy' is deliberately excluded even though your environment supports
+# it — it's an alias for the exact same code path as 'closest_than_capacity'
+# (see environment.py's _resolve_conflicts()), so running both would just
+# duplicate compute for identical results.
+# 'hungarian_bids' is excluded too — it requires a trained policy's logits
+# as bids, which baselines don't have (see eval_baseline.py's automatic
+# fallback to 'hungarian' if you ever pass it here anyway).
+RESOLVERS=(capacity closest_than_capacity random hungarian predicted_reward predicted_reward_joint)
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RUN_ROOT="runs/run_${TIMESTAMP}_policy_resolver_cmp"
