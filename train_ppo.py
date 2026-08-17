@@ -269,11 +269,16 @@
 #         # noop_logit.log (one line per rollout), so you can see directly
 #         # whether/how the noop bias moves over training, whether or not
 #         # freeze_noop_logit is set.
+#         #
+#         # 8 decimal places deliberately: with lr~3e-4 and possibly
+#         # near-cancelling advantage-weighted gradients, real movement can
+#         # sit in the 4th-5th decimal — invisible at the default float
+#         # precision and on a plot whose y-axis spans several full units.
 #         if self.noop_log_path:
 #             noop_logit_value = float(self.model.policy.noop_logit.item())
 #             os.makedirs(os.path.dirname(os.path.abspath(self.noop_log_path)) or ".", exist_ok=True)
 #             with open(self.noop_log_path, "a") as f:
-#                 f.write(f"episode={self.ep_idx}, ts={self.num_timesteps}, noop_logit={noop_logit_value}\n")
+#                 f.write(f"episode={self.ep_idx}, ts={self.num_timesteps}, noop_logit={noop_logit_value:.8f}\n")
 
 
 # class CheckpointCallback(BaseCallback):
@@ -457,9 +462,7 @@
 #             missing = actor_ids - opt_ids
 #             assert not missing, f"{len(missing)} actor params NOT in optimizer — this is the bug"
 #             print(f"actor params: {len(actor_ids)}, in optimizer: {len(actor_ids & opt_ids)}")
-#             # print(policy_kwargs)
-#             print(f"{'noop_logit':40s} requires_grad={model.policy.noop_logit.requires_grad} "
-#       f"shape={tuple(model.policy.noop_logit.shape)} value={model.policy.noop_logit.item():.4f}")
+
 #             print("\n=== ACTOR PARAMETERS ===")
 #             for name, p in model.policy.gnn_ac.named_parameters():
 #                 print(f"{name:40s} requires_grad={p.requires_grad} shape={tuple(p.shape)}")
@@ -486,6 +489,14 @@
 #         print(f"Error creating model: {e}")
 #         traceback.print_exc()
 #         return
+
+#     # Only needed for conflict_resolution='hungarian_bids' (see
+#     # RTGNNPolicy.forward() and env.set_pending_logits() docstrings) — a
+#     # no-op for every other resolver, since the policy checks for None
+#     # before ever touching it.
+#     if config.get("conflict_resolution") == "hungarian_bids":
+#         model.policy._bid_env = model.env
+#         print("  ✓ Wired model.policy._bid_env for hungarian_bids conflict resolution")
 
 #     # ── Training ──────────────────────────────────────────────────────────────
 #     print("\n" + "=" * 80)
@@ -574,6 +585,10 @@
 #                          help="Reuse an existing runs/run_{id}/ folder (e.g. to add seeds to "
 #                               "a previous sweep or resume with --continue-training). "
 #                               "Defaults to a fresh UTC timestamp.")
+#     parser.add_argument("--conflict-resolution", type=str, default=None,
+#                          choices=["greedy", "random", "hungarian", "hungarian_bids"],
+#                          help="Override config's conflict_resolution without editing the yaml — "
+#                               "for sweeping resolvers from a shell script.")
 #     args = parser.parse_args()
 
 #     continue_training = args.continue_training
@@ -585,6 +600,10 @@
 #     config = load_config(args.config)
 #     if config is None:
 #         raise FileNotFoundError(f"Could not load config: {args.config}")
+
+#     if args.conflict_resolution is not None:
+#         config["conflict_resolution"] = args.conflict_resolution
+#         print(f"Overriding conflict_resolution -> {args.conflict_resolution}\n")
 
 #     seeds = [args.seed] if args.seed is not None else get_seed_list(config)
 #     run_id = args.run_id or datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -628,11 +647,11 @@ import numpy as np
 import torch as th
 import yaml
 import random 
-
+ 
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import BaseCallback
-
+ 
 from src.environment.environment import MultiAgentTaskEnv
 from src.models.sb3_gnn_policy import RTGNNPolicy, compute_all_action_logit_stats
 from src.utils.logit_metrics_logger import (
@@ -644,35 +663,35 @@ from src.utils.logit_metrics_logger import (
     ensure_rank_logit_metrics_log,
     append_rank_logit_metrics_log,
 )
-
-
+ 
+ 
 # ============================================================================
 # Tee — mirror stdout to file
 # ============================================================================
-
+ 
 class Tee:
     def __init__(self, filename: str, mode: str = "w", base_stdout=None):
         self.file   = open(filename, mode)
         self.stdout = base_stdout if base_stdout is not None else sys.stdout
         sys.stdout  = self
-
+ 
     def write(self, data):
         self.stdout.write(data)
         self.file.write(data)
-
+ 
     def flush(self):
         self.stdout.flush()
         self.file.flush()
-
+ 
     def close(self):
         sys.stdout = self.stdout
         self.file.close()
-
-
+ 
+ 
 # ============================================================================
 # Utils
 # ============================================================================
-
+ 
 def get_git_commit() -> str:
     try:
         return subprocess.check_output(
@@ -680,26 +699,26 @@ def get_git_commit() -> str:
         ).decode().strip()
     except Exception:
         return "unknown"
-
-
+ 
+ 
 def load_config(config_path: str) -> Optional[Dict]:
     if not Path(config_path).exists():
         return None
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
-
-
+ 
+ 
 def load_generated_data(data_dir: str, n_batches: Optional[int] = None):
     print("Loading data...")
     data_path = Path(data_dir)
-
+ 
     agents_file = data_path / "agents.npy"
     if not agents_file.exists():
         raise FileNotFoundError(f"Agents file not found: {agents_file}")
-
+ 
     agents = np.load(agents_file, allow_pickle=True)
     print(f"  ✓ Agents: {agents.shape}")
-
+ 
     tasks_batches, idx = [], 0
     while True:
         if n_batches is not None and idx >= n_batches:
@@ -711,14 +730,14 @@ def load_generated_data(data_dir: str, n_batches: Optional[int] = None):
         tasks_batches.append(batch)
         print(f"  ✓ Batch {idx}: {batch.shape}")
         idx += 1
-
+ 
     if not tasks_batches:
         raise FileNotFoundError(f"No task batches found in {data_path}")
-
+ 
     print(f"  ✓ Total: {len(agents)} robots, {len(tasks_batches)} batches")
     return agents, tasks_batches
-
-
+ 
+ 
 def _latest_model_path(model_dir: str):
     """Find latest saved model by timestep number."""
     import re, glob
@@ -732,7 +751,7 @@ def _latest_model_path(model_dir: str):
         raise FileNotFoundError(f"No saved models in {model_dir}")
     ts, ep, path = sorted(candidates)[-1]
     return path, ep, ts
-
+ 
 def set_global_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
@@ -741,8 +760,8 @@ def set_global_seed(seed: int):
         th.cuda.manual_seed(seed)
         th.cuda.manual_seed_all(seed)
     # Keep minimal changes; no forced deterministic flags unless you want strict reproducibility.
-
-
+ 
+ 
 def get_seed_list(config: Dict) -> List[int]:
     # Preferred: seeds: [1,2,3]
     if "seeds" in config and config["seeds"] is not None:
@@ -752,7 +771,7 @@ def get_seed_list(config: Dict) -> List[int]:
         return seeds
     # Fallback: seed: 42
     return [int(config.get("seed", 42))]
-
+ 
 # ============================================================================
 # Callbacks
 # ============================================================================
@@ -771,18 +790,18 @@ class TrainingLogCallback(BaseCallback):
         super().__init__(verbose)
         self.log_freq = log_freq
         self.step_count = 0
-
+ 
         self.logit_metrics_log_path = logit_metrics_log_path
         self.rank_logit_metrics_log_path = rank_logit_metrics_log_path
         self.noop_log_path = noop_log_path
         self.K_max = K_max
         self.seed = seed
         self.continue_training = continue_training
-
+ 
         self.ep_idx = 0
         self._core_step_buffer = []  # LogitStepMetrics, this episode (reference-matching schema)
         self._rank_step_buffer = []  # compute_all_action_logit_stats() dicts, this episode
-
+ 
     def _on_training_start(self) -> None:
         if self.logit_metrics_log_path:
             ensure_logit_metrics_log(self.logit_metrics_log_path, overwrite=not self.continue_training)
@@ -794,10 +813,10 @@ class TrainingLogCallback(BaseCallback):
                 os.remove(self.noop_log_path)
             except Exception:
                 pass
-
+ 
     def _on_step(self) -> bool:
         self.step_count += 1
-
+ 
         # Capture logit diagnostics EVERY step (not gated by log_freq) since
         # these need to accumulate correctly for the per-episode aggregate —
         # gating would silently undercount episodes shorter than log_freq.
@@ -817,10 +836,10 @@ class TrainingLogCallback(BaseCallback):
                 self._rank_step_buffer.append(
                     compute_all_action_logit_stats(self.model.policy, new_obs, K_max=self.K_max)
                 )
-
+ 
         dones = self.locals.get("dones")
         infos = self.locals.get("infos", [])
-
+ 
         if dones is not None and any(dones):
             if self.logit_metrics_log_path and self._core_step_buffer:
                 ep_metrics = aggregate_episode_logit_metrics(
@@ -832,7 +851,7 @@ class TrainingLogCallback(BaseCallback):
                 self.logger.record("train/logit_gap", ep_metrics.mean_margin)  # best_cand - noop
                 self.logger.record("train/top1_top2_margin", ep_metrics.mean_top1_top2_margin)
                 self._core_step_buffer = []
-
+ 
             if self.rank_logit_metrics_log_path and self._rank_step_buffer:
                 rank_metrics = aggregate_episode_rank_logit_metrics(
                     self._rank_step_buffer, policy="train", seed=self.seed,
@@ -845,28 +864,28 @@ class TrainingLogCallback(BaseCallback):
                     if v is not None:
                         self.logger.record(f"train/rank_{i}_logit", v)
                 self._rank_step_buffer = []
-
+ 
             self.ep_idx += 1
-
+ 
         if self.step_count % self.log_freq != 0:
             return True
-
+ 
         for info in infos:
             if "episode" not in info:
                 continue
             ep = info["episode"]
-
+ 
             ep_total = max(1, int(info.get("ep_total_action_count", 0)))
             inv_rate = float(info.get("ep_invalid_action_count", 0)) / ep_total
             cap_rate = float(info.get("ep_capacity_rejected_count", 0)) / ep_total
             cfl_rate = float(info.get("ep_conflict_dropped_count", 0)) / ep_total
-
+ 
             decisions_total = max(1, int(info.get("ep_decisions_total", 0)))
             had_candidates  = max(1, int(info.get("ep_had_candidates_count", 0)))
             noop_forced_rate = int(info.get("ep_noop_forced_count", 0)) / decisions_total
             noop_chosen_rate = int(info.get("ep_noop_chosen_count", 0)) / decisions_total
             chosen_noop_rate_when_available = int(info.get("ep_noop_chosen_count", 0)) / had_candidates
-
+ 
             print(
                 f"TS:{self.num_timesteps:7d} | "
                 f"R:{ep.get('r', float('nan')):8.2f} | L:{ep.get('l', -1):5d} | "
@@ -880,7 +899,7 @@ class TrainingLogCallback(BaseCallback):
                 f"r_obs:{info.get('ep_r_obsolete', 0.0):7.2f}"
             )
         return True
-
+ 
     def _on_rollout_end(self) -> None:
         # Per-rollout noop_logit snapshot — mirrors the reference repo's
         # noop_logit.log (one line per rollout), so you can see directly
@@ -896,39 +915,39 @@ class TrainingLogCallback(BaseCallback):
             os.makedirs(os.path.dirname(os.path.abspath(self.noop_log_path)) or ".", exist_ok=True)
             with open(self.noop_log_path, "a") as f:
                 f.write(f"episode={self.ep_idx}, ts={self.num_timesteps}, noop_logit={noop_logit_value:.8f}\n")
-
-
+ 
+ 
 class CheckpointCallback(BaseCallback):
     """Save model checkpoints — mirrors colleague's model_episode{ep}_ts{ts}.zip naming."""
-
+ 
     def __init__(self, save_freq: int = 10000, save_path: str = "./models"):
         super().__init__()
         self.save_freq = save_freq
         self.save_path = Path(save_path)
         self.save_path.mkdir(parents=True, exist_ok=True)
         self.ep_idx = 0
-
+ 
     def _on_step(self) -> bool:
         for info in self.locals.get("infos", []):
             if "episode" in info:
                 self.ep_idx += 1
-
+ 
         if self.num_timesteps % self.save_freq == 0:
             path = self.save_path / f"model_episode{self.ep_idx}_ts{self.num_timesteps}.zip"
             self.model.save(str(path))
             print(f"  ✓ Checkpoint: {path.name}")
         return True
-
-
+ 
+ 
 # ============================================================================
 # Main
 # ============================================================================
-
+ 
 def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: str, base_stdout=None):
     set_global_seed(seed)
-
+ 
     two_hop = config.get("two_hop", False)
-
+ 
     # New layout: runs/run_{run_id}/seed_{seed}/  — one run_id per training
     # session/sweep, with every seed trained in that sweep grouped under it.
     # (Old layout was runs/seed_{seed}/run_{run_id}/, which scattered a
@@ -945,7 +964,7 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
     print(f" Seed      : {seed}")
     print(f" Run dir   : {run_dir}")
     print(f" Model dir : {model_dir}")
-
+ 
     try:
         agents, tasks_batches = load_generated_data(
             config.get("data_dir", "data"),
@@ -955,7 +974,7 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
         print(f"Error loading data: {e}")
         traceback.print_exc()
         return
-
+ 
     print("\nCreating environment...")
     print('two hop flag',two_hop)
     try:
@@ -987,13 +1006,13 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
             W_OBS=config.get("W_OBS", 1.0),
             conflict_resolution=config.get("conflict_resolution", "greedy"),
         )
-
+ 
         feature_dim = base_env.F
         print(f"   Feature dim  : {feature_dim}")
         print(f"   Action space : {base_env.action_space}")
         print(f"   two_hop      : {two_hop}")
         print(f"   vicinity_m   : {config.get('vicinity_m', 40.0)}")
-
+ 
         # Monitor with episode_reward as tracked keyword
         # action_mask stays in info as-is — RTGNNPolicy handles masking internally
         env = Monitor(
@@ -1001,12 +1020,12 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
             filename=str(log_dir / "monitor.csv"),
             info_keywords=("completed_count", "obsolete_count"),
         )
-
+ 
     except Exception as e:
         print(f"Error creating environment: {e}")
         traceback.print_exc()
         return
-
+ 
     # ── Policy kwargs ─────────────────────────────────────────────────────────
     policy_kwargs = dict(
         in_dim=feature_dim,
@@ -1023,10 +1042,10 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
         critic_aggregation=config.get("critic_aggregation", "joint_mean"),
         gnn_kwargs={"layers": int(config.get("gnn_layers", 2))},
     )
-
+ 
     device = "cuda" if th.cuda.is_available() else "cpu"
     print(f"\nDevice: {device}")
-
+ 
     try:
         if continue_training:
             latest_path, last_ep, last_ts = _latest_model_path(str(model_dir))
@@ -1034,7 +1053,7 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
             model = PPO.load(latest_path, env=env, device=device)
             model.num_timesteps = int(last_ts)
             print(f"  ✓ Resuming from episode {last_ep}, timestep {last_ts}")
-
+ 
             # PPO.load() restores noop_logit exactly as it was pickled —
             # including requires_grad — WITHOUT re-reading the current
             # config's freeze_noop_logit/noop_init. Without this, a
@@ -1079,7 +1098,7 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
             missing = actor_ids - opt_ids
             assert not missing, f"{len(missing)} actor params NOT in optimizer — this is the bug"
             print(f"actor params: {len(actor_ids)}, in optimizer: {len(actor_ids & opt_ids)}")
-
+ 
             print("\n=== ACTOR PARAMETERS ===")
             for name, p in model.policy.gnn_ac.named_parameters():
                 print(f"{name:40s} requires_grad={p.requires_grad} shape={tuple(p.shape)}")
@@ -1090,23 +1109,23 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
             print(f"{'noop_logit':40s} requires_grad={model.policy.noop_logit.requires_grad} "
                   f"shape={tuple(model.policy.noop_logit.shape)} value={model.policy.noop_logit.item():.4f}")
             print("========================\n")
-
-
+ 
+ 
             # ------------------------
             # Force noop_logit to config value (matches colleague's pattern)
             model.policy.noop_logit.data.fill_(float(config.get("noop_init", -1.0)))
             print(f"   noop_logit set to: {model.policy.noop_logit.item():.3f}")
-
+ 
             # Save init model (matches colleague's pattern)
             init_path = model_dir / "model_episode0_ts0.zip"
             model.save(str(init_path))
             print(f"  ✓ Init model saved: {init_path.name}")
-
+ 
     except Exception as e:
         print(f"Error creating model: {e}")
         traceback.print_exc()
         return
-
+ 
     # Only needed for conflict_resolution='hungarian_bids' (see
     # RTGNNPolicy.forward() and env.set_pending_logits() docstrings) — a
     # no-op for every other resolver, since the policy checks for None
@@ -1114,21 +1133,21 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
     if config.get("conflict_resolution") == "hungarian_bids":
         model.policy._bid_env = model.env
         print("  ✓ Wired model.policy._bid_env for hungarian_bids conflict resolution")
-
+ 
     # ── Training ──────────────────────────────────────────────────────────────
     print("\n" + "=" * 80)
     print("STARTING TRAINING")
     print("=" * 80 + "\n")
-
+ 
     checkpoint_cb = CheckpointCallback(
         save_freq=config.get("checkpoint_freq", 50000),
         save_path=str(model_dir),
     )
-
+ 
     logit_metrics_log_path = str(log_dir / "training_logit_metrics.log")       # reference-schema (best-vs-noop)
     rank_logit_metrics_log_path = str(log_dir / "training_logit_ranks.csv")    # "all actions" extension
     noop_log_path = str(model_dir / "noop_logit.log")
-
+ 
     final_path = run_dir / "ppo_final.zip"
     try:
         model.learn(
@@ -1148,7 +1167,7 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
             reset_num_timesteps=not continue_training,
         )
         print("\n✓ Training complete!")
-
+ 
     except KeyboardInterrupt:
         print("\n⚠️  Interrupted")
     except Exception as e:
@@ -1160,8 +1179,8 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
             print(f"✓ Final model saved: {final_path}")
         except Exception as e:
             print(f"Save failed: {e}")
-
-
+ 
+ 
     #metadata
     # Metadata
     metadata = {
@@ -1184,13 +1203,13 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
     print(f"  TensorBoard: tensorboard --logdir {tb_dir}")
     print(f"  Finished   : {datetime.datetime.now().isoformat()}")
     print("=" * 80 + "\n")
-
+ 
     env.close()
     tee.close()  # restore sys.stdout so the next seed's Tee doesn't nest
-
+ 
     return run_dir
-
-
+ 
+ 
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -1203,30 +1222,30 @@ def main():
                               "a previous sweep or resume with --continue-training). "
                               "Defaults to a fresh UTC timestamp.")
     parser.add_argument("--conflict-resolution", type=str, default=None,
-                         choices=["greedy", "random", "hungarian", "hungarian_bids"],
+                         choices=["greedy", "random", "hungarian", "hungarian_bids", "capacity", "closest_than_capacity"],
                          help="Override config's conflict_resolution without editing the yaml — "
                               "for sweeping resolvers from a shell script.")
     args = parser.parse_args()
-
+ 
     continue_training = args.continue_training
-
+ 
     print("=" * 80)
     print("GNN-PPO Training")
     print("=" * 80 + "\n")
-
+ 
     config = load_config(args.config)
     if config is None:
         raise FileNotFoundError(f"Could not load config: {args.config}")
-
+ 
     if args.conflict_resolution is not None:
         config["conflict_resolution"] = args.conflict_resolution
         print(f"Overriding conflict_resolution -> {args.conflict_resolution}\n")
-
+ 
     seeds = [args.seed] if args.seed is not None else get_seed_list(config)
     run_id = args.run_id or datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     print(f"Run ID: {run_id}")
     print(f"Seeds to run: {seeds}\n")
-
+ 
     base_stdout = sys.stdout
     run_dirs = []
     for i, seed in enumerate(seeds):
@@ -1239,13 +1258,13 @@ def main():
             sys.stdout = base_stdout
             print(f"⚠️  Seed {seed} failed: {e}")
             traceback.print_exc()
-
+ 
     print("\n" + "=" * 80)
     print(f"All seeds finished. Runs:")
     for rd in run_dirs:
         print(f"  {rd}")
     print("=" * 80)
-
-
+ 
+ 
 if __name__ == "__main__":
     main()

@@ -124,5 +124,5 @@ logit_temperature: 1.0
 noop_init: -1.0
 freeze_noop_logit: false
 #experiments
-seeds: [42] #[42, 123, 456]
+seeds: [42, 123] #[42, 123, 456]
 

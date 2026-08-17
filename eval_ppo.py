@@ -367,11 +367,19 @@
  
 #     print("Running deterministic...")
 #     env_det = make_env(agents, tasks, config, seed)
+#     if config.get("conflict_resolution") == "hungarian_bids":
+#         # Same wiring train_ppo.py does after model construction — forward()
+#         # needs a live reference to THIS eval run's env to push logits into
+#         # before step(actions). Must be re-set per env (det/stoch are
+#         # separate VecEnv instances), not just once for the whole model.
+#         model.policy._bid_env = env_det
 #     det = run_eval(model, env_det, episodes, True)
 #     env_det.close()
  
 #     print("Running stochastic...")
 #     env_sto = make_env(agents, tasks, config, seed + 1)
+#     if config.get("conflict_resolution") == "hungarian_bids":
+#         model.policy._bid_env = env_sto
 #     sto = run_eval(model, env_sto, episodes, False)
 #     env_sto.close()
  
@@ -399,6 +407,39 @@
 #     return det, sto
  
  
+# def load_run_config(run_dir: Path, fallback_config_path: str, conflict_resolution_override: str = None):
+#     """Load the config a given run was ACTUALLY trained/built under, from
+#     its own run_metadata.json, instead of blindly re-reading the live
+#     configs/training_config.yaml — which may have been edited (or, in a
+#     multi-resolver sweep, may simply have a different conflict_resolution
+#     than this specific run) since that run was created. Falls back to the
+#     live yaml only if metadata is missing, with a loud warning.
+
+#     conflict_resolution_override, if given, wins even over the run's own
+#     saved config — for deliberately evaluating a trained/baseline run under
+#     a different resolver than it was built with (an ablation in its own
+#     right), rather than for routine use.
+#     """
+#     metadata_path = run_dir / "run_metadata.json"
+#     run_config = None
+#     if metadata_path.exists():
+#         with open(metadata_path, "r") as f:
+#             metadata = json.load(f)
+#         run_config = metadata.get("config")
+
+#     if run_config is None:
+#         print(f"⚠️  No run_metadata.json config found for {run_dir} — falling back to "
+#               f"{fallback_config_path}. Results may not reflect what this run actually used "
+#               f"if that file has changed since.")
+#         run_config = load_config(fallback_config_path) or {}
+
+#     if conflict_resolution_override is not None:
+#         run_config = dict(run_config)
+#         run_config["conflict_resolution"] = conflict_resolution_override
+
+#     return run_config
+
+
 # def main():
 #     ap = argparse.ArgumentParser()
 #     ap.add_argument("--config", default="configs/training_config.yaml")
@@ -418,9 +459,12 @@
 #     ap.add_argument("--output", type=str, default=None,
 #                     help="Optional override output dir (defaults to run_dir/eval_results). "
 #                          "Ignored (per-seed subfolders used instead) when --all-seeds is set.")
+#     ap.add_argument("--conflict-resolution", type=str, default=None,
+#                      choices=["greedy", "random", "hungarian", "hungarian_bids"],
+#                      help="Evaluate under a DIFFERENT resolver than this run was trained "
+#                           "with (overrides the run's own saved config). Default: use "
+#                           "whatever the run actually trained under.")
 #     args = ap.parse_args()
- 
-#     config = load_config(args.config)
  
 #     print("\n============================")
 #     print(" PPO EVALUATION")
@@ -435,6 +479,7 @@
 #         for seed_dir in seed_dirs:
 #             seed = int(seed_dir.name.replace("seed_", ""))
 #             set_seed(seed)
+#             config = load_run_config(seed_dir, args.config, args.conflict_resolution)
 #             det, sto = evaluate_one_seed(seed, seed_dir, config, agents, tasks, args.episodes)
 #             results[seed] = {"det_mean": det["stats"]["reward_mean"], "sto_mean": sto["stats"]["reward_mean"]}
  
@@ -455,11 +500,14 @@
 #     else:
 #         run_dir = find_latest_run(args.seed, args.run_id)
  
+#     config = load_run_config(run_dir, args.config, args.conflict_resolution)
 #     evaluate_one_seed(args.seed, run_dir, config, agents, tasks, args.episodes, args.output)
  
  
 # if __name__ == "__main__":
 #     main()
+
+
 """
 Evaluate trained GNN-PPO model (deterministic + stochastic)
 Clean + robust + debug metrics
@@ -473,7 +521,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
+ 
 import numpy as np
 import torch
 import yaml
@@ -686,7 +734,7 @@ def run_eval(model, env, episodes, deterministic):
                 rwait_sum += float(info.get("r_wait", 0.0))
                 rdead_sum += float(info.get("r_deadline", 0.0))
                 robs_sum += float(info.get("r_obsolete", 0.0))
-
+ 
                 noop_forced_sum += int(info.get("noop_forced_count", 0))
                 noop_chosen_sum += int(info.get("noop_chosen_count", 0))
                 had_cand_sum    += int(info.get("had_candidates_count", 0))
@@ -715,12 +763,12 @@ def run_eval(model, env, episodes, deterministic):
         ep_r_wait.append(rwait_sum)
         ep_r_deadline.append(rdead_sum)
         ep_r_obsolete.append(robs_sum)
-
+ 
         ep_noop_forced.append(noop_forced_sum)
         ep_noop_chosen.append(noop_chosen_sum)
         ep_had_candidates.append(had_cand_sum)
         ep_decisions.append(decisions_sum)
-
+ 
     r = np.array(rewards, dtype=float)
  
     total_actions_all = int(np.sum(ep_totals))
@@ -737,7 +785,7 @@ def run_eval(model, env, episodes, deterministic):
     noop_chosen_all    = int(np.sum(ep_noop_chosen))
     had_candidates_all = int(np.sum(ep_had_candidates))
  
-
+ 
     noop_frac_forced_rate = (noop_forced_all / decisions_all) if decisions_all > 0 else 0.0
     noop_frac_chosen_rate = (noop_chosen_all / decisions_all) if decisions_all > 0 else 0.0
     chosen_noop_rate_when_available = (
@@ -764,7 +812,7 @@ def run_eval(model, env, episodes, deterministic):
         "ep_r_wait": ep_r_wait,
         "ep_r_deadline": ep_r_deadline,
         "ep_r_obsolete": ep_r_obsolete,
-
+ 
         "ep_noop_forced_count": ep_noop_forced,
         "ep_noop_chosen_count": ep_noop_chosen,
         "ep_had_candidates_count": ep_had_candidates,
@@ -792,7 +840,7 @@ def run_eval(model, env, episodes, deterministic):
             "r_wait_mean": float(np.mean(ep_r_wait)) if ep_r_wait else 0.0,
             "r_deadline_mean": float(np.mean(ep_r_deadline)) if ep_r_deadline else 0.0,
             "r_obsolete_mean": float(np.mean(ep_r_obsolete)) if ep_r_obsolete else 0.0,
-
+ 
             "noop_frac_forced": float(noop_frac_forced_rate),
             "noop_frac_chosen": float(noop_frac_chosen_rate),
             "chosen_noop_rate_when_available": float(chosen_noop_rate_when_available),
@@ -876,7 +924,7 @@ def load_run_config(run_dir: Path, fallback_config_path: str, conflict_resolutio
     multi-resolver sweep, may simply have a different conflict_resolution
     than this specific run) since that run was created. Falls back to the
     live yaml only if metadata is missing, with a loud warning.
-
+ 
     conflict_resolution_override, if given, wins even over the run's own
     saved config — for deliberately evaluating a trained/baseline run under
     a different resolver than it was built with (an ablation in its own
@@ -888,20 +936,20 @@ def load_run_config(run_dir: Path, fallback_config_path: str, conflict_resolutio
         with open(metadata_path, "r") as f:
             metadata = json.load(f)
         run_config = metadata.get("config")
-
+ 
     if run_config is None:
         print(f"⚠️  No run_metadata.json config found for {run_dir} — falling back to "
               f"{fallback_config_path}. Results may not reflect what this run actually used "
               f"if that file has changed since.")
         run_config = load_config(fallback_config_path) or {}
-
+ 
     if conflict_resolution_override is not None:
         run_config = dict(run_config)
         run_config["conflict_resolution"] = conflict_resolution_override
-
+ 
     return run_config
-
-
+ 
+ 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/training_config.yaml")
@@ -922,7 +970,7 @@ def main():
                     help="Optional override output dir (defaults to run_dir/eval_results). "
                          "Ignored (per-seed subfolders used instead) when --all-seeds is set.")
     ap.add_argument("--conflict-resolution", type=str, default=None,
-                     choices=["greedy", "random", "hungarian", "hungarian_bids"],
+                     choices=["greedy", "random", "hungarian", "hungarian_bids", "capacity", "closest_than_capacity"],
                      help="Evaluate under a DIFFERENT resolver than this run was trained "
                           "with (overrides the run's own saved config). Default: use "
                           "whatever the run actually trained under.")

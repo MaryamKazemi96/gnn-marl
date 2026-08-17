@@ -62,6 +62,35 @@
 #         return yaml.safe_load(f)
 
 
+# def load_run_config(run_dir: Path, fallback_config_path: str, conflict_resolution_override: str = None):
+#     """Load the config a given run was ACTUALLY trained/built under, from
+#     its own run_metadata.json, instead of blindly re-reading the live
+#     configs/training_config.yaml. Matters especially for baselines in a
+#     multi-resolver comparison: baselines go through the same environment's
+#     conflict resolver as PPO does, so they must be evaluated under the
+#     SAME resolver as the run they're being compared against — not whatever
+#     happens to currently be in the yaml. See eval_ppo.py's identical
+#     helper for the full rationale."""
+#     metadata_path = run_dir / "run_metadata.json"
+#     run_config = None
+#     if metadata_path.exists():
+#         with open(metadata_path, "r") as f:
+#             metadata = json.load(f)
+#         run_config = metadata.get("config")
+
+#     if run_config is None:
+#         print(f"⚠️  No run_metadata.json config found for {run_dir} — falling back to "
+#               f"{fallback_config_path}. Baseline results may not reflect the resolver "
+#               f"this run actually used if that file has changed since.")
+#         run_config = load_config(fallback_config_path) or {}
+
+#     if conflict_resolution_override is not None:
+#         run_config = dict(run_config)
+#         run_config["conflict_resolution"] = conflict_resolution_override
+
+#     return run_config
+
+
 # def _get_mask(obs: Any, info: Any) -> Optional[np.ndarray]:
 #     """Extract action mask from observation or info."""
 #     if isinstance(info, dict) and "action_mask" in info:
@@ -500,10 +529,13 @@
 #                     help="Run ID created by train_ppo.py (defaults to latest run)")
 #     ap.add_argument("--all-seeds", action="store_true",
 #                     help="Evaluate every seed in the selected run.")
+#     ap.add_argument("--conflict-resolution", type=str, default=None,
+#                     choices=["greedy", "random", "hungarian", "hungarian_bids"],
+#                     help="Evaluate baselines under a DIFFERENT resolver than this run's "
+#                          "own saved config. Default: use whatever the run actually used, "
+#                          "so PPO and baselines are compared under the same resolver.")
 
 #     args = ap.parse_args()
-
-#     config = load_config(args.config)
 
 #     print("=" * 80)
 #     print("Loading Generated Data")
@@ -528,6 +560,7 @@
 #         seed_dirs = [find_latest_run(args.seed, args.run_id)]
 
 #     for seed_dir in seed_dirs:
+#         config = load_run_config(seed_dir, args.config, args.conflict_resolution)
 
 #         seed = int(seed_dir.name.replace("seed_", ""))
 #         eval_dir = seed_dir / "eval_results"
@@ -545,6 +578,20 @@
 #         for policy_name in POLICIES:
 
 #             print(f"  Evaluating {policy_name}...")
+
+#             # Baselines pick actions via pure heuristics — there is no
+#             # policy in this loop at all, so there are no logits to bid
+#             # with. 'hungarian_bids' is meaningless here; fall back to
+#             # plain distance-based 'hungarian' as the closest well-defined
+#             # equivalent, so baselines still get a real, comparable
+#             # centralized-assignment resolver rather than silently
+#             # crashing (see set_pending_logits()'s RuntimeError in
+#             # environment.py for why it would otherwise).
+#             env_conflict_resolution = config.get("conflict_resolution", "greedy")
+#             if env_conflict_resolution == "hungarian_bids":
+#                 env_conflict_resolution = "hungarian"
+#                 print("    (conflict_resolution='hungarian_bids' has no meaning for baselines — "
+#                       "no policy/logits exist here — using 'hungarian' distance-based assignment instead)")
 
 #             try:
 #                 base_env = MultiAgentTaskEnv(
@@ -573,7 +620,7 @@
 #                     W_WAIT=config.get("W_WAIT", 1.0),
 #                     W_DEADLINE=config.get("W_DEADLINE", 10.0),
 #                     W_OBS=config.get("W_OBS", 1.0),
-#                     conflict_resolution=config.get("conflict_resolution", "greedy"),
+#                     conflict_resolution=env_conflict_resolution,
 #                 )
 #             except Exception as e:
 #                 print(f"  Error creating environment: {e}")
@@ -654,9 +701,10 @@
 #     main()
 
 
+ 
 """
 Evaluate baseline policies (random, greedy, unique) on MultiAgentTaskEnv.
-
+ 
 Policies:
 - greedy: pick candidate slot 0 if valid, else NOOP
 - random: uniformly sample among all valid actions
@@ -667,19 +715,19 @@ import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
+ 
 import numpy as np
 import yaml
-
+ 
 from src.environment.environment import MultiAgentTaskEnv
-
+ 
 # Import data loading function from train_ppo
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from train_ppo import load_generated_data
-
-
-POLICIES = ["random", "greedy", "unique"]
-
+ 
+ 
+POLICIES = ["random", "greedy", "unique", "pickup_deadline", "pickup_deadline_distance"]
+ 
 def latest_run_id(runs_root: Path) -> Path:
     """Most recently modified runs/run_{id}/ sweep folder."""
     run_dirs = sorted(runs_root.glob("run_*"), key=lambda p: p.stat().st_mtime)
@@ -711,13 +759,13 @@ def all_seed_dirs_in_run(run_id: str = None, runs_root: str = "runs") -> List[Pa
         raise FileNotFoundError(f"No seed_* directories found in {run_root}")
     return seed_dirs
  
-
+ 
 def load_config(config_path: str) -> dict:
     """Load YAML config file."""
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
-
-
+ 
+ 
 def load_run_config(run_dir: Path, fallback_config_path: str, conflict_resolution_override: str = None):
     """Load the config a given run was ACTUALLY trained/built under, from
     its own run_metadata.json, instead of blindly re-reading the live
@@ -733,20 +781,20 @@ def load_run_config(run_dir: Path, fallback_config_path: str, conflict_resolutio
         with open(metadata_path, "r") as f:
             metadata = json.load(f)
         run_config = metadata.get("config")
-
+ 
     if run_config is None:
         print(f"⚠️  No run_metadata.json config found for {run_dir} — falling back to "
               f"{fallback_config_path}. Baseline results may not reflect the resolver "
               f"this run actually used if that file has changed since.")
         run_config = load_config(fallback_config_path) or {}
-
+ 
     if conflict_resolution_override is not None:
         run_config = dict(run_config)
         run_config["conflict_resolution"] = conflict_resolution_override
-
+ 
     return run_config
-
-
+ 
+ 
 def _get_mask(obs: Any, info: Any) -> Optional[np.ndarray]:
     """Extract action mask from observation or info."""
     if isinstance(info, dict) and "action_mask" in info:
@@ -754,8 +802,8 @@ def _get_mask(obs: Any, info: Any) -> Optional[np.ndarray]:
     if isinstance(obs, dict) and "action_mask" in obs:
         return np.asarray(obs["action_mask"])
     return None
-
-
+ 
+ 
 def _get_last_cand_task_ids(env) -> Optional[List[List[int]]]:
     """Get candidate task IDs from environment."""
     try:
@@ -763,15 +811,15 @@ def _get_last_cand_task_ids(env) -> Optional[List[List[int]]]:
         return getattr(env0, "_last_cand_task_ids", None)
     except Exception:
         return None
-
-
+ 
+ 
 def _infer_decision_interval(env, config: Dict) -> int:
     """Infer decision interval from environment or config."""
     # For our simplified env, decision interval is effectively 1
     # (we make decisions every step)
     return 1
-
-
+ 
+ 
 def greedy_nearest_action(mask: np.ndarray, R: int, NOOP: int) -> np.ndarray:
     """
     Greedy policy: select candidate slot 0 if valid, else NOOP.
@@ -785,8 +833,8 @@ def greedy_nearest_action(mask: np.ndarray, R: int, NOOP: int) -> np.ndarray:
         else:
             a[r] = NOOP
     return a
-
-
+ 
+ 
 def random_valid_action(
     mask: np.ndarray, R: int, NOOP: int, rng: np.random.Generator
 ) -> np.ndarray:
@@ -806,8 +854,8 @@ def random_valid_action(
         else:
             a[r] = NOOP
     return a
-
-
+ 
+ 
 def greedy_unique_action(
     mask: np.ndarray,
     env,
@@ -833,10 +881,10 @@ def greedy_unique_action(
     if cand_ids is None:
         # Fallback to greedy if no candidate IDs available
         return greedy_nearest_action(mask, R, NOOP)
-
+ 
     chosen = set()
     a = np.full((R,), NOOP, dtype=np.int64)
-
+ 
     for r in robot_order:
         # Optional: shuffle k scan order
         if shuffle_k:
@@ -844,7 +892,7 @@ def greedy_unique_action(
             rng.shuffle(ks)
         else:
             ks = range(K_max)
-
+ 
         # Scan candidate slots for this robot
         for k in ks:
             if mask[r, k] != 1:
@@ -867,10 +915,105 @@ def greedy_unique_action(
             chosen.add(task_id)
             a[r] = int(k)
             break
-
+ 
     return a
-
-
+ 
+ 
+def pickup_deadline_action(
+    mask: np.ndarray, env, R: int, K_max: int, NOOP: int,
+) -> np.ndarray:
+    """
+    Pickup-deadline policy (matches reference repo's 'pickup_deadline'):
+    for each robot, among its valid candidate slots, pick the one whose
+    task has the SOONEST pickup_deadline — urgency-first rather than
+    distance-first. Ties are broken by lowest task_id (arbitrary but
+    stable), NOT by slot order, since slot order is always distance-sorted
+    in this environment (_get_candidate_tasks()) and using it as an
+    implicit tie-break would make this behaviorally identical to
+    pickup_deadline_distance_action below rather than a genuinely
+    distance-agnostic baseline. Falls back to NOOP if no valid candidates
+    or task lookup fails.
+    """
+    cand_ids = _get_last_cand_task_ids(env)
+    a = np.full((R,), NOOP, dtype=np.int64)
+    if cand_ids is None:
+        return greedy_nearest_action(mask, R, NOOP)
+ 
+    tasks = getattr(env.unwrapped, "tasks", None)
+    if tasks is None:
+        return greedy_nearest_action(mask, R, NOOP)
+ 
+    for r in range(R):
+        best_k, best_deadline, best_task_id = None, None, None
+        for k in range(K_max):
+            if mask[r, k] != 1:
+                continue
+            try:
+                task_id = int(cand_ids[r][k])
+            except (IndexError, TypeError, ValueError):
+                continue
+            task = tasks.get(str(task_id))
+            if task is None:
+                continue
+            deadline = task.get("pickup_deadline", float("inf"))
+            if (
+                best_deadline is None
+                or deadline < best_deadline
+                or (deadline == best_deadline and task_id < best_task_id)
+            ):
+                best_deadline = deadline
+                best_task_id = task_id
+                best_k = k
+        a[r] = best_k if best_k is not None else NOOP
+ 
+    return a
+ 
+ 
+def pickup_deadline_distance_action(
+    mask: np.ndarray, env, R: int, K_max: int, NOOP: int,
+) -> np.ndarray:
+    """
+    Pickup-deadline-distance policy (matches reference repo's
+    'pickup_deadline_distance'): same urgency-first ranking as
+    pickup_deadline_action, but breaks ties between candidates with an
+    (approximately) equal deadline by distance — since candidate slots are
+    already distance-sorted ascending by _get_candidate_tasks(), the
+    lowest slot index among tied-deadline candidates is already the
+    nearest one, so ties are broken naturally by preferring the smaller
+    slot index without needing a second distance lookup.
+    """
+    cand_ids = _get_last_cand_task_ids(env)
+    a = np.full((R,), NOOP, dtype=np.int64)
+    if cand_ids is None:
+        return greedy_nearest_action(mask, R, NOOP)
+ 
+    tasks = getattr(env.unwrapped, "tasks", None)
+    if tasks is None:
+        return greedy_nearest_action(mask, R, NOOP)
+ 
+    for r in range(R):
+        best_k, best_deadline = None, None
+        for k in range(K_max):
+            if mask[r, k] != 1:
+                continue
+            try:
+                task_id = str(int(cand_ids[r][k]))
+            except (IndexError, TypeError, ValueError):
+                continue
+            task = tasks.get(task_id)
+            if task is None:
+                continue
+            deadline = task.get("pickup_deadline", float("inf"))
+            # strict '<' (not '<=') so an earlier slot index (nearer,
+            # since slots are distance-sorted) wins any exact tie
+            if best_deadline is None or deadline < best_deadline:
+                best_deadline = deadline
+                best_k = k
+        a[r] = best_k if best_k is not None else NOOP
+ 
+    return a
+ 
+ 
 def evaluate_policy(
     env,
     config: Dict,
@@ -887,7 +1030,7 @@ def evaluate_policy(
     Returns dict with per-episode metrics and aggregated stats.
     """
     rng = np.random.default_rng(seed)
-
+ 
     action_space = env.action_space
     assert hasattr(action_space, "nvec"), "Expected MultiDiscrete action space"
     
@@ -895,23 +1038,23 @@ def evaluate_policy(
     Kp1 = int(action_space.nvec[0])
     K_max = Kp1 - 1
     NOOP = K_max
-
+ 
     decision_interval = _infer_decision_interval(env, config)
-
+ 
     # Metrics tracking
     ep_rewards: List[float] = []
     ep_lengths: List[int] = []
     ep_completed: List[int] = []
     ep_obsolete: List[int] = []
-
+ 
     for ep in range(n_episodes):
         obs, info = env.reset(seed=seed + ep)
         done = False
         ep_rew = 0.0
         ep_len = 0
-
+ 
         last_action = np.full((R,), NOOP, dtype=np.int64)
-
+ 
         while not done:
             # Make decision at each step (decision_interval=1)
             if ep_len % max(1, decision_interval) == 0:
@@ -920,20 +1063,20 @@ def evaluate_policy(
                     raise RuntimeError("No action_mask found in info or obs.")
                 
                 mask = (np.asarray(mask) == 1).astype(np.int32)
-
+ 
                 # Robot order (optional weakening knob)
                 if shuffle_robots:
                     robot_order = np.arange(R, dtype=int)
                     rng.shuffle(robot_order)
                 else:
                     robot_order = np.arange(R, dtype=int)
-
+ 
                 if policy_name == "greedy":
                     last_action = greedy_nearest_action(mask, R, NOOP)
-
+ 
                 elif policy_name == "random":
                     last_action = random_valid_action(mask, R, NOOP, rng)
-
+ 
                 elif policy_name == "unique":
                     last_action = greedy_unique_action(
                         mask=mask,
@@ -945,21 +1088,28 @@ def evaluate_policy(
                         shuffle_k=unique_shuffle_k,
                         rng=rng,
                     )
+ 
+                elif policy_name == "pickup_deadline":
+                    last_action = pickup_deadline_action(mask, env, R, K_max, NOOP)
+ 
+                elif policy_name == "pickup_deadline_distance":
+                    last_action = pickup_deadline_distance_action(mask, env, R, K_max, NOOP)
+ 
                 else:
                     raise ValueError(f"Unknown policy: {policy_name}")
-
+ 
                 if debug and ep == 0 and ep_len < 5:
                     valid_slots = mask[:, :K_max].sum(axis=1).astype(int).tolist()
                     print(f"[DEBUG step {ep_len}] valid_slots_per_robot(excl NOOP): {valid_slots}")
                     print(f"[DEBUG step {ep_len}] has_cand_ids: {_get_last_cand_task_ids(env) is not None}")
                     print(f"[DEBUG step {ep_len}] action: {last_action.tolist()}")
-
+ 
             # Step environment
             obs, reward, terminated, truncated, info = env.step(last_action)
             ep_rew += float(reward)
             ep_len += 1
             done = bool(terminated or truncated)
-
+ 
         ep_rewards.append(ep_rew)
         ep_lengths.append(ep_len)
         
@@ -970,13 +1120,13 @@ def evaluate_policy(
         else:
             ep_completed.append(0)
             ep_obsolete.append(0)
-
+ 
         if debug or (ep + 1) % max(1, max(n_episodes // 5, 1)) == 0:
             print(
                 f"  {policy_name:8s} | Episode {ep+1:3d}/{n_episodes} | "
                 f"Reward: {ep_rew:8.2f} | Length: {ep_len:4d}"
             )
-
+ 
     # Aggregate statistics
     rr = np.asarray(ep_rewards, dtype=float)
     return {
@@ -994,15 +1144,15 @@ def evaluate_policy(
             "length_mean": float(np.mean(ep_lengths)) if ep_lengths else 0.0,
         },
     }
-
-
+ 
+ 
 def _concat_results(results_list: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Concatenate results from multiple seeds."""
     out = {"rewards": [], "completed": [], "obsolete": [], "lengths": []}
     for r in results_list:
         for k in out.keys():
             out[k].extend(r.get(k, []))
-
+ 
     rr = np.asarray(out["rewards"], dtype=float)
     out["stats"] = {
         "reward_mean": float(rr.mean()) if rr.size else 0.0,
@@ -1012,8 +1162,8 @@ def _concat_results(results_list: List[Dict[str, Any]]) -> Dict[str, Any]:
         "length_mean": float(np.mean(out["lengths"])) if out["lengths"] else 0.0,
     }
     return out
-
-
+ 
+ 
 def main_one_seedd() -> None:
     ap = argparse.ArgumentParser(
         description="Evaluate baseline policies on MultiAgentTaskEnv"
@@ -1039,9 +1189,9 @@ def main_one_seedd() -> None:
     ap.add_argument("--all-seeds", action="store_true",
                 help="Evaluate every seed in the selected run.")
     args = ap.parse_args()
-
+ 
     config = load_config(args.config)
-
+ 
     # Determine seeds
     seeds = config.get("experiment", {}).get("seeds", None)
     if args.seed is not None:
@@ -1050,10 +1200,10 @@ def main_one_seedd() -> None:
         seeds = [int(config["experiment"]["seed"])]
     else:
         seeds = [int(s) for s in seeds]
-
+ 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-
+ 
     # Load data once
     print("="*80)
     print("Loading Generated Data")
@@ -1068,20 +1218,20 @@ def main_one_seedd() -> None:
     except Exception as e:
         print(f" Error loading data: {e}")
         return
-
+ 
     per_seed: Dict[str, Dict[str, Any]] = {}
     per_policy_allseeds: Dict[str, List[Dict[str, Any]]] = {p: [] for p in POLICIES}
-
+ 
     for seed in seeds:
         print("=" * 80)
         print(f"Seed {seed} | Episodes per policy: {args.episodes}")
         print("=" * 80 + "\n")
-
+ 
         per_seed[str(seed)] = {}
-
+ 
         for policy_name in POLICIES:
             print(f"  Evaluating {policy_name}...")
-
+ 
             # Create environment
             try:
                 base_env = MultiAgentTaskEnv(
@@ -1102,7 +1252,7 @@ def main_one_seedd() -> None:
             except Exception as e:
                 print(f"  Error creating environment: {e}")
                 continue
-
+ 
             # Evaluate policy
             try:
                 res = evaluate_policy(
@@ -1117,32 +1267,32 @@ def main_one_seedd() -> None:
                 )
                 per_seed[str(seed)][policy_name] = res
                 per_policy_allseeds[policy_name].append(res)
-
+ 
                 # Save per-policy results
                 p = out_dir / f"baseline_{policy_name}_seed_{seed}.json"
                 p.write_text(json.dumps(res, indent=2))
                 print(f"   {policy_name}: {res['stats']['reward_mean']:.2f} ± {res['stats']['reward_std']:.2f}\n")
-
+ 
             except Exception as e:
                 print(f"   Error evaluating {policy_name}: {e}")
                 import traceback
                 traceback.print_exc()
-
+ 
             try:
                 base_env.close()
             except Exception:
                 pass
-
+ 
     # Combine results across seeds
     print("\n" + "="*80)
     print("Summary (All Seeds Combined)")
     print("="*80 + "\n")
-
+ 
     combined_results = {p: _concat_results(per_policy_allseeds[p]) for p in POLICIES}
     combined_results["num_episodes_per_seed"] = int(args.episodes)
     combined_results["num_seeds"] = len(seeds)
     combined_results["seeds"] = seeds
-
+ 
     # Print summary table
     print(f"{'Policy':<12} {'Reward Mean':<15} {'Reward Std':<15} {'Completed':<15}")
     # print("-" * 60)
@@ -1155,14 +1305,14 @@ def main_one_seedd() -> None:
                 f"{stats['reward_std']:>12.2f}     "
                 f"{stats['completed_mean']:>12.2f}"
             )
-
+ 
     # Save combined results
     (out_dir / "baseline_results_all.json").write_text(json.dumps(combined_results, indent=2))
     (out_dir / "baseline_results_per_seed.json").write_text(json.dumps(per_seed, indent=2))
-
+ 
     print(f"\n✓ Saved combined results to {out_dir / 'baseline_results_all.json'}")
     print(f"✓ Saved per-seed results to {out_dir / 'baseline_results_per_seed.json'}\n")
-
+ 
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Evaluate baseline policies on MultiAgentTaskEnv"
@@ -1186,17 +1336,17 @@ def main() -> None:
     ap.add_argument("--all-seeds", action="store_true",
                     help="Evaluate every seed in the selected run.")
     ap.add_argument("--conflict-resolution", type=str, default=None,
-                    choices=["greedy", "random", "hungarian", "hungarian_bids"],
+                    choices=["greedy", "random", "hungarian", "hungarian_bids", "capacity", "closest_than_capacity"],
                     help="Evaluate baselines under a DIFFERENT resolver than this run's "
                          "own saved config. Default: use whatever the run actually used, "
                          "so PPO and baselines are compared under the same resolver.")
-
+ 
     args = ap.parse_args()
-
+ 
     print("=" * 80)
     print("Loading Generated Data")
     print("=" * 80 + "\n")
-
+ 
     try:
         agents, tasks_batches = load_generated_data(args.data_dir)
         print(f"✓ Data loaded!")
@@ -1206,7 +1356,7 @@ def main() -> None:
     except Exception as e:
         print(f"Error loading data: {e}")
         return
-
+ 
     # -------------------------------------------------------------
     # Determine which seed directories to evaluate
     # -------------------------------------------------------------
@@ -1214,27 +1364,27 @@ def main() -> None:
         seed_dirs = all_seed_dirs_in_run(args.run_id)
     else:
         seed_dirs = [find_latest_run(args.seed, args.run_id)]
-
+ 
     for seed_dir in seed_dirs:
         config = load_run_config(seed_dir, args.config, args.conflict_resolution)
-
+ 
         seed = int(seed_dir.name.replace("seed_", ""))
         eval_dir = seed_dir / "eval_results"
         eval_dir.mkdir(parents=True, exist_ok=True)
-
+ 
         print("=" * 80)
         print(f"Seed {seed} | Episodes per policy: {args.episodes}")
         print("=" * 80 + "\n")
-
+ 
         per_seed: Dict[str, Dict[str, Any]] = {str(seed): {}}
         per_policy_allseeds: Dict[str, List[Dict[str, Any]]] = {
             p: [] for p in POLICIES
         }
-
+ 
         for policy_name in POLICIES:
-
+ 
             print(f"  Evaluating {policy_name}...")
-
+ 
             # Baselines pick actions via pure heuristics — there is no
             # policy in this loop at all, so there are no logits to bid
             # with. 'hungarian_bids' is meaningless here; fall back to
@@ -1248,7 +1398,7 @@ def main() -> None:
                 env_conflict_resolution = "hungarian"
                 print("    (conflict_resolution='hungarian_bids' has no meaning for baselines — "
                       "no policy/logits exist here — using 'hungarian' distance-based assignment instead)")
-
+ 
             try:
                 base_env = MultiAgentTaskEnv(
                     agents=agents,
@@ -1281,7 +1431,7 @@ def main() -> None:
             except Exception as e:
                 print(f"  Error creating environment: {e}")
                 continue
-
+ 
             try:
                 res = evaluate_policy(
                     env=base_env,
@@ -1293,32 +1443,32 @@ def main() -> None:
                     shuffle_robots=args.shuffle_robots,
                     unique_shuffle_k=args.unique_shuffle_k,
                 )
-
+ 
                 per_seed[str(seed)][policy_name] = res
                 per_policy_allseeds[policy_name].append(res)
-
+ 
                 # save individual policy result
                 (eval_dir / f"baseline_{policy_name}.json").write_text(
                     json.dumps(res, indent=2)
                 )
-
+ 
                 print(
                     f"   {policy_name}: "
                     f"{res['stats']['reward_mean']:.2f} ± "
                     f"{res['stats']['reward_std']:.2f}\n"
                 )
-
+ 
             except Exception as e:
                 print(f"   Error evaluating {policy_name}: {e}")
                 import traceback
                 traceback.print_exc()
-
+ 
             finally:
                 try:
                     base_env.close()
                 except Exception:
                     pass
-
+ 
         # ---------------------------------------------------------
         # Combined summary for this seed
         # ---------------------------------------------------------
@@ -1329,18 +1479,18 @@ def main() -> None:
         combined_results["num_episodes_per_seed"] = int(args.episodes)
         combined_results["num_seeds"] = 1
         combined_results["seeds"] = [seed]
-
+ 
         (eval_dir / "baseline_results_all.json").write_text(
             json.dumps(combined_results, indent=2)
         )
         (eval_dir / "baseline_results_per_seed.json").write_text(
             json.dumps(per_seed, indent=2)
         )
-
+ 
         print("\n" + "=" * 80)
         print(f"Summary (Seed {seed})")
         print("=" * 80 + "\n")
-
+ 
         print(f"{'Policy':<12} {'Reward Mean':<15} {'Reward Std':<15} {'Completed':<15}")
         for policy in POLICIES:
             stats = combined_results[policy]["stats"]
@@ -1350,7 +1500,7 @@ def main() -> None:
                 f"{stats['reward_std']:>12.2f}     "
                 f"{stats['completed_mean']:>12.2f}"
             )
-
+ 
         print(f"\n✓ Results saved to {eval_dir}\n")
         
 if __name__ == "__main__":

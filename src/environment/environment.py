@@ -288,10 +288,15 @@
 #             )
         
 #         self.conflict_resolution = conflict_resolution.lower()
-#         if self.conflict_resolution not in ("greedy", "random", "hungarian"):
+#         if self.conflict_resolution not in ("greedy", "random", "hungarian", "hungarian_bids"):
 #             raise ValueError(
-#                 "conflict_resolution must be 'greedy', 'random', or 'hungarian'"
+#                 "conflict_resolution must be 'greedy', 'random', 'hungarian', or 'hungarian_bids'"
 #             )
+
+#         # Populated externally, once per macro-step, by RTGNNPolicy.forward()
+#         # via set_pending_logits() — only used by conflict_resolution=
+#         # 'hungarian_bids'. None until the first policy forward() call.
+#         self._pending_logits = None
 #     # =========================================================================
 #     # RESET
 #     # =========================================================================
@@ -299,6 +304,7 @@
 #     def reset(self, seed=None, options=None):
 #         super().reset(seed=seed)
 
+#         self._pending_logits = None
 #         self.current_time = 0.0
 #         self.current_step = 0
 #         self.episode_completed_count = 0
@@ -563,6 +569,8 @@
 #             return self._resolve_conflicts_random(requests)
 #         elif self.conflict_resolution == "hungarian":
 #             return self._resolve_conflicts_hungarian(requests)
+#         elif self.conflict_resolution == "hungarian_bids":
+#             return self._resolve_conflicts_hungarian_bids(requests)
 #         else:
 #             raise ValueError(f"Unknown conflict_resolution: {self.conflict_resolution}")
 
@@ -670,7 +678,92 @@
 #         # count the same way an unmatched greedy/random loser would.
 #         self.debug_last_conflict_dropped_count += max(0, R - len(winners))
 #         return winners
-    
+
+#     def set_pending_logits(self, logits: np.ndarray) -> None:
+#         """Called externally (by RTGNNPolicy.forward(), see
+#         src/models/sb3_gnn_policy.py) once per macro-step, BEFORE step() is
+#         called for that same decision, with this robot-step's raw candidate
+#         logits — shape [R, K_max], same per-robot ordering as
+#         sorted(self.robots.keys()) and same per-slot ordering as
+#         self._last_cand_task_ids. Used only by
+#         conflict_resolution='hungarian_bids' as bid values in place of
+#         distance. Not required for 'greedy'/'random'/'hungarian'."""
+#         self._pending_logits = np.asarray(logits, dtype=np.float64)
+
+#     def _resolve_conflicts_hungarian_bids(self, requests):
+#         """Centralized optimal assignment via the Hungarian algorithm, using
+#         the POLICY'S OWN LOGITS as bid values instead of distance — i.e. a
+#         genuine auction: each robot's bid for a task is how strongly its
+#         policy already wants that task (higher logit = stronger bid), and
+#         the solver finds the assignment that maximizes total bid value
+#         (equivalently: minimizes total NEGATIVE bid) across every robot
+#         that made a request and every task any of them proposed, subject to
+#         the same eligibility rule as _resolve_conflicts_hungarian (a robot
+#         can only be assigned a task that was actually in its own candidate
+#         list this step).
+
+#         Requires set_pending_logits() to have been called this step (see
+#         that method's docstring) — raises clearly if not, rather than
+#         silently falling back to something else, since a silent fallback
+#         would make it easy to not notice bids were never actually wired up.
+#         """
+#         if self._pending_logits is None:
+#             raise RuntimeError(
+#                 "conflict_resolution='hungarian_bids' requires set_pending_logits() "
+#                 "to be called each step before step(actions) — see "
+#                 "RTGNNPolicy.forward() in src/models/sb3_gnn_policy.py, and make "
+#                 "sure model.policy._bid_env is wired to this env's VecEnv after "
+#                 "construction (see train_ppo.py)."
+#             )
+
+#         robot_ids = sorted({r for _, r, _ in requests})
+#         task_ids  = sorted({t for _, _, t in requests})
+#         R, T = len(robot_ids), len(task_ids)
+#         if R == 0 or T == 0:
+#             return []
+
+#         r_idx = {rid: i for i, rid in enumerate(robot_ids)}
+#         t_idx = {tid: i for i, tid in enumerate(task_ids)}
+
+#         robot_ids_sorted_all = sorted(self.robots.keys())
+
+#         # Map robot_id -> {task_id: bid_logit}, using that robot's OWN
+#         # candidate list crossed with that SAME robot's OWN logits for
+#         # those same slots (both indexed identically by slot position).
+#         own_bids = {}
+#         for rid in robot_ids:
+#             try:
+#                 r_pos = robot_ids_sorted_all.index(rid)
+#                 offered = self._last_cand_task_ids[r_pos]
+#                 logits_row = self._pending_logits[r_pos]  # [K_max]
+#             except (ValueError, IndexError):
+#                 offered, logits_row = [], None
+#             bid_map = {}
+#             if logits_row is not None:
+#                 for slot, tid_at_slot in enumerate(offered):
+#                     if tid_at_slot is not None and slot < len(logits_row):
+#                         bid_map[tid_at_slot] = float(logits_row[slot])
+#             own_bids[rid] = bid_map
+
+#         INFEASIBLE = 1e9
+#         cost = np.full((R, T), INFEASIBLE, dtype=np.float64)
+#         for rid in robot_ids:
+#             bid_map = own_bids[rid]
+#             for tid in task_ids:
+#                 if tid in bid_map:
+#                     cost[r_idx[rid], t_idx[tid]] = -bid_map[tid]  # maximize bid == minimize -bid
+
+#         row_ind, col_ind = linear_sum_assignment(cost)
+
+#         winners = []
+#         for ri, ti in zip(row_ind, col_ind):
+#             if cost[ri, ti] >= INFEASIBLE:
+#                 continue
+#             winners.append((robot_ids[ri], task_ids[ti]))
+
+#         self.debug_last_conflict_dropped_count += max(0, R - len(winners))
+#         return winners
+
 #     def _process_actions(self, actions) -> Dict:
 #         """
 #         Uses _last_cand_task_ids from observation-time snapshot to prevent
@@ -1471,6 +1564,8 @@
 #     def close(self):
 #         pass
 
+
+
 """
 Comprehensive multi-agent task allocation environment with full simulator logic.
 
@@ -1761,10 +1856,9 @@ class MultiAgentTaskEnv(gym.Env):
             )
         
         self.conflict_resolution = conflict_resolution.lower()
-        if self.conflict_resolution not in ("greedy", "random", "hungarian", "hungarian_bids"):
-            raise ValueError(
-                "conflict_resolution must be 'greedy', 'random', 'hungarian', or 'hungarian_bids'"
-            )
+        _valid_resolvers = ("greedy", "random", "hungarian", "hungarian_bids", "capacity", "closest_than_capacity")
+        if self.conflict_resolution not in _valid_resolvers:
+            raise ValueError(f"conflict_resolution must be one of {_valid_resolvers}")
 
         # Populated externally, once per macro-step, by RTGNNPolicy.forward()
         # via set_pending_logits() — only used by conflict_resolution=
@@ -2044,17 +2138,45 @@ class MultiAgentTaskEnv(gym.Env):
             return self._resolve_conflicts_hungarian(requests)
         elif self.conflict_resolution == "hungarian_bids":
             return self._resolve_conflicts_hungarian_bids(requests)
+        elif self.conflict_resolution in ("capacity", "closest_than_capacity"):
+            # closest_than_capacity is an alias for the existing 'greedy'
+            # resolver (distance-sort, then first-come-wins under capacity)
+            # — matches the reference repo's naming for that same behavior,
+            # not a separate implementation.
+            if self.conflict_resolution == "closest_than_capacity":
+                return self._resolve_conflicts_greedy(requests)
+            return self._resolve_conflicts_capacity(requests)
         else:
             raise ValueError(f"Unknown conflict_resolution: {self.conflict_resolution}")
 
     def _resolve_conflicts_greedy(self, requests):
         """Original behavior: process requests in ascending-distance order;
         first robot to claim a task wins it, later claims for the same task
-        are dropped as conflicts."""
+        are dropped as conflicts. Matches the reference repo's
+        'closest_than_capacity' — distance is the priority, capacity is
+        the constraint."""
         ordered = sorted(requests, key=lambda r: r[0])
         assigned_this_step = set()
         winners = []
         for dist, robot_id, task_id in ordered:
+            if task_id in assigned_this_step:
+                self.debug_last_conflict_dropped_count += 1
+                continue
+            assigned_this_step.add(task_id)
+            winners.append((robot_id, task_id))
+        return winners
+
+    def _resolve_conflicts_capacity(self, requests):
+        """The simplest possible resolver, matching the reference repo's
+        'capacity': NO priority ordering at all — not distance, not
+        randomized — requests are processed in whatever order they were
+        constructed in (i.e. robot iteration order from _process_actions),
+        first-come-wins per contested task, with capacity as the only
+        real constraint. This is deliberately the 'dumbest' baseline
+        resolver other resolvers should be expected to beat."""
+        assigned_this_step = set()
+        winners = []
+        for dist, robot_id, task_id in requests:  # requests kept in original (unsorted) order
             if task_id in assigned_this_step:
                 self.debug_last_conflict_dropped_count += 1
                 continue
