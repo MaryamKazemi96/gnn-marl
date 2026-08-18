@@ -11,7 +11,7 @@ python3 eval_baseline.py --config configs/training_config.yaml --episodes 50 --a
 
 echo "Starting Plot training..."
 python3 plot_training.py --seed 42
-python3 plot_training.py --seed 123
+#python3 plot_training.py --seed 123
 #python3 plot_training.py --seed 456
 
 echo "Evaluating PPO..."
