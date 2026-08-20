@@ -1,12 +1,79 @@
+# # Robot Parameters
+# max_robot_capacity: 3
+# max_wait_delay_s:   300.0
+# max_travel_delay_s: 100.0
+# movement_spee: 1.0
+# capacity_method: "assigned"
+
+
+# # Reward
+# W_COMP: 2.0
+# W_WAIT: 1.5
+# W_DEADLINE: 15.0 #10.0
+# W_OBS: 5.0 #4.0
+
+# # Environment parameters
+# num_robots: 6
+# num_tasks: 40
+# vicinity_m: 40
+# batch_time: 180
+# decision_interval: 8  # Steps between policy decisions
+# conflict_resolution: predicted_reward_joint # greedy | random | hungarian
+
+# # Graph parameters
+# K_max: 3             # Max candidate tasks per robot
+# N_max: 16             # Max nodes in ego-graph
+# E_max: 64             # Max edges in ego-graph
+# two_hop: True
+# use_xy_pickup: False
+# normalize_features: True
+# use_node_type: True
+# use_ego_robot: True
+# use_edge_rt: True
+# two_hop_directed: True
+
+# use_node_type: true
+# use_ego_robot: true
+# use_edge_rt: true
+
+# # PPO parameters
+# ppo_steps: 256
+# batch_size: 64
+# learning_rate: 0.0003
+# ent_coef: 0.003
+# total_timesteps: 150000
+# max_steps: 2500
+# gamma: 0.99
+# clip_range: 0.2
+# vf_coef: 0.3
+# gae_lambda: 0.95
+# n_epochs: 5
+# max_grad_norm: 0.5
+
+# # Policy Parameter
+# hidden: 128
+# logit_temperature: 1.0
+# noop_init: -1.0
+# freeze_noop_logit: false
+# #experiments
+# seeds: [42] #[42, 123, 456]
+
+# use_predicted_score: true
+
 # Robot Parameters
-max_robot_capacity: 3
-max_wait_delay_s:   300.0
-max_travel_delay_s: 100.0
+max_robot_capacity: 2        # was 3 — matches reference's cap2 configs
+max_wait_delay_s:   300.0    # already matched
+max_travel_delay_s: 240.0    # was 100.0 — matches reference
 movement_spee: 1.0
 capacity_method: "assigned"
 
-
 # Reward
+# NOTE: reference uses a structurally different reward formula
+# (reward_type: wait_travel, w_deadline: 0, dedicated w_travel term,
+# completion_mode: valid_dropoff gating completion on on-time dropoff) —
+# NOT yet ported, since it needs code changes to _compute_rewards, not
+# just these weights. Left at your existing values for now; flagging this
+# as the next fidelity gap once you're ready to tackle it.
 W_COMP: 2.0
 W_WAIT: 1.5
 W_DEADLINE: 15.0 #10.0
@@ -15,16 +82,34 @@ W_OBS: 5.0 #4.0
 # Environment parameters
 num_robots: 6
 num_tasks: 40
-vicinity_m: 40
+vicinity_m: 40                # left as-is — reference's 2000.0 is SUMO
+                               # real-world meters on a road network, not
+                               # directly portable to this grid's scale
 batch_time: 180
-decision_interval: 8  # Steps between policy decisions
-conflict_resolution: predicted_reward_joint # greedy | random | hungarian
+decision_interval: 8          # left as-is — reference's decision_dt: 60 is
+                               # SUMO seconds, different unit, not directly
+                               # portable; both are "macro-step" semantics
+                               # though (confirmed via code), so the ratio
+                               # to max_steps is what actually matters
+conflict_resolution: greedy   # was predicted_reward_joint — matches
+                               # reference's closest_then_capacity (same
+                               # code path as this repo's "greedy"): a
+                               # non-reassigning resolver gives PPO a much
+                               # cleaner action->outcome relationship to
+                               # learn from than a Hungarian-based one that
+                               # can silently redirect its chosen action
+candidates_sorting: randomized # NEW — matches reference; prevents the GNN
+                               # from learning a lazy "prefer low slot
+                               # index" shortcut instead of reasoning
+                               # about each candidate's actual features
 
 # Graph parameters
-K_max: 3             # Max candidate tasks per robot
-N_max: 16             # Max nodes in ego-graph
-E_max: 64             # Max edges in ego-graph
-two_hop: True
+K_max: 3
+N_max: 16
+E_max: 64
+two_hop: False                # was True — matches reference (her own
+                               # slide: "1-hop comparable/exceeds strong
+                               # 2-hop heuristic baseline")
 use_xy_pickup: False
 normalize_features: True
 use_node_type: True
@@ -36,25 +121,38 @@ use_node_type: true
 use_ego_robot: true
 use_edge_rt: true
 
+robot_commitment: route_slots  # NEW — already implemented in feature_fn.py
+                                # (_robot_route_slots), just never enabled;
+                                # gives the policy its own committed-route
+                                # state as input features
+route_slots_k: 2
+
 # PPO parameters
-ppo_steps: 1024
+ppo_steps: 256        # was 1024 — matches reference's n_steps
 batch_size: 64
 learning_rate: 0.0003
-ent_coef: 0.008
-total_timesteps: 20000
-max_steps: 2500
+ent_coef: 0.003        # was 0.008 — matches reference
+total_timesteps: 100000  
+max_steps: 3000        # was 2500 — matches reference
 gamma: 0.99
 clip_range: 0.2
-vf_coef: 0.5
+vf_coef: 0.35           # was 0.5 — matches reference
 gae_lambda: 0.95
 n_epochs: 5
 max_grad_norm: 0.5
 
 # Policy Parameter
 hidden: 128
-logit_temperature: 1.0
+logit_temperature: 1.0   # already matched
 noop_init: -1.0
 freeze_noop_logit: false
+noop_mode: state_dependent  # NEW — matches reference; per-state noop
+                             # logit via a small learned head on the
+                             # robot's own ego-node embedding, instead of
+                             # one shared global scalar
+
 #experiments
 seeds: [42] #[42, 123, 456]
-
+# reference trains 20 seeds and evaluates each on 10 eval seeds — worth
+# expanding once you've confirmed the above changes help, for a more
+# statistically reliable comparison than a single seed can give you
