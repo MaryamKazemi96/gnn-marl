@@ -165,6 +165,23 @@ class TrainingLogCallback(BaseCallback):
         self.ep_idx = 0
         self._core_step_buffer = []  # LogitStepMetrics, this episode (reference-matching schema)
         self._rank_step_buffer = []  # compute_all_action_logit_stats() dicts, this episode
+
+        # Edge-feature sanity check (mirrors the reference repo's
+        # rp_logger_callback.py _edge_sum/_edge_sumsq/_edge_min/_edge_max
+        # pattern) — logged ONCE, early in training, not continuously.
+        # Purpose: catch a degenerate/broken edge feature (e.g. constant
+        # zero, unnormalized, NaN) before sinking hours into a 200k-step
+        # run on top of it. Dynamically sized to whatever edge_attr's last
+        # dimension actually is at runtime, rather than the reference's
+        # hardcoded 3 — so this stays correct regardless of exactly which
+        # edge_features your config lists.
+        self._edge_stats_initialized = False
+        self._edge_sum = None
+        self._edge_sumsq = None
+        self._edge_min = None
+        self._edge_max = None
+        self._edge_count = 0
+        self._edge_logged = False
  
     def _on_training_start(self) -> None:
         if self.logit_metrics_log_path:
@@ -200,6 +217,32 @@ class TrainingLogCallback(BaseCallback):
                 self._rank_step_buffer.append(
                     compute_all_action_logit_stats(self.model.policy, new_obs, K_max=self.K_max)
                 )
+
+            if not self._edge_logged:
+                edge_attr = new_obs.get("edge_attr") if isinstance(new_obs, dict) else None
+                if edge_attr is not None:
+                    try:
+                        if hasattr(edge_attr, "detach"):
+                            edge_attr = edge_attr.detach().cpu().numpy()
+                        ea = np.asarray(edge_attr)
+                        if ea.ndim >= 2 and ea.shape[-1] > 0:
+                            n_dims = ea.shape[-1]
+                            slice_ea = ea.reshape(-1, n_dims)
+                            if slice_ea.size > 0:
+                                if not self._edge_stats_initialized:
+                                    self._edge_sum = np.zeros((n_dims,), dtype=np.float64)
+                                    self._edge_sumsq = np.zeros((n_dims,), dtype=np.float64)
+                                    self._edge_min = np.full((n_dims,), np.inf, dtype=np.float64)
+                                    self._edge_max = np.full((n_dims,), -np.inf, dtype=np.float64)
+                                    self._edge_stats_initialized = True
+                                self._edge_sum += slice_ea.sum(axis=0)
+                                self._edge_sumsq += np.square(slice_ea).sum(axis=0)
+                                self._edge_min = np.minimum(self._edge_min, slice_ea.min(axis=0))
+                                self._edge_max = np.maximum(self._edge_max, slice_ea.max(axis=0))
+                                self._edge_count += slice_ea.shape[0]
+                    except Exception as e:
+                        if self.verbose > 0:
+                            print(f"[WARN] Could not compute edge_attr stats: {e}")
  
         dones = self.locals.get("dones")
         infos = self.locals.get("infos", [])
@@ -265,6 +308,30 @@ class TrainingLogCallback(BaseCallback):
         return True
  
     def _on_rollout_end(self) -> None:
+        # Edge-feature sanity check — one-time, first rollout only. See
+        # __init__ for why this exists and what it's meant to catch.
+        if not self._edge_logged and self._edge_count > 0:
+            mean = self._edge_sum / float(self._edge_count)
+            var = (self._edge_sumsq / float(self._edge_count)) - np.square(mean)
+            std = np.sqrt(np.maximum(var, 0.0))
+            print(
+                "[EdgeAttr sanity check] count={} dims={} mean={} std={} min={} max={}".format(
+                    int(self._edge_count),
+                    len(mean),
+                    np.round(mean, 6).tolist(),
+                    np.round(std, 6).tolist(),
+                    np.round(self._edge_min, 6).tolist(),
+                    np.round(self._edge_max, 6).tolist(),
+                )
+            )
+            if np.any(std < 1e-8):
+                flat_dims = [i for i, s in enumerate(std) if s < 1e-8]
+                print(f"[WARN] Edge feature dim(s) {flat_dims} have ~zero variance — "
+                      f"likely constant/degenerate. Worth checking before a long run.")
+            if np.any(~np.isfinite(mean)):
+                print(f"[WARN] Edge feature stats contain NaN/inf — check edge_attr computation.")
+            self._edge_logged = True
+
         # Per-rollout noop_logit snapshot — mirrors the reference repo's
         # noop_logit.log (one line per rollout), so you can see directly
         # whether/how the noop bias moves over training, whether or not
