@@ -121,19 +121,13 @@ vf_coef: 0.35           # was 0.5 — matches reference
 gae_lambda: 0.95
 n_epochs: 5
 max_grad_norm: 0.5
+target_kl: 0.03 
 
 # Policy Parameter
 hidden: 128
 logit_temperature: 1.0   # already matched
 noop_init: -1.0
 freeze_noop_logit: false
-noop_mode: state_dependent  # NEW — matches reference; per-state noop
-                             # logit via a small learned head on the
-                             # robot's own ego-node embedding, instead of
-                             # one shared global scalar
-
+noop_mode: state_dependent  
 #experiments
-seeds: [42, 123, 456] #[42, 123, 456]
-# reference trains 20 seeds and evaluates each on 10 eval seeds — worth
-# expanding once you've confirmed the above changes help, for a more
-# statistically reliable comparison than a single seed can give you
+seeds: [42, 123, 456] 

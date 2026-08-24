@@ -124,18 +124,47 @@
 #     return 1
  
  
-# def greedy_nearest_action(mask: np.ndarray, R: int, NOOP: int) -> np.ndarray:
+# def greedy_nearest_action(mask: np.ndarray, env, R: int, K_max: int, NOOP: int) -> np.ndarray:
 #     """
-#     Greedy policy: select candidate slot 0 if valid, else NOOP.
-    
-#     This assumes candidate slots are ordered by preference (nearest first).
+#     Greedy policy: pick whichever valid candidate is ACTUALLY nearest.
+
+#     Looks up real distance via env instead of assuming slot 0 == nearest —
+#     that assumption only holds when the environment's candidates_sorting
+#     is 'distance' (the default). With candidates_sorting='randomized'
+#     (matches the reference config, avoids the GNN learning a lazy
+#     "prefer low slot index" shortcut), slot order carries no distance
+#     information at all, so this function must compute distance itself to
+#     remain a genuine nearest-neighbor baseline either way.
 #     """
+#     cand_ids = _get_last_cand_task_ids(env)
 #     a = np.full((R,), NOOP, dtype=np.int64)
+#     if cand_ids is None:
+#         return a
+
+#     base_env = env.unwrapped
+#     robot_ids = sorted(base_env.robots.keys())
+
 #     for r in range(R):
-#         if mask[r, 0] == 1:
-#             a[r] = 0
-#         else:
-#             a[r] = NOOP
+#         if r >= len(robot_ids):
+#             continue
+#         robot = base_env.robots[robot_ids[r]]
+#         best_k, best_dist = None, None
+#         for k in range(K_max):
+#             if mask[r, k] != 1:
+#                 continue
+#             try:
+#                 task_id = str(int(cand_ids[r][k]))
+#             except (IndexError, TypeError, ValueError):
+#                 continue
+#             task = base_env.tasks.get(task_id)
+#             if task is None:
+#                 continue
+#             dist = (task["pickup_x"] - robot["x"]) ** 2 + (task["pickup_y"] - robot["y"]) ** 2
+#             if best_dist is None or dist < best_dist:
+#                 best_dist = dist
+#                 best_k = k
+#         a[r] = best_k if best_k is not None else NOOP
+
 #     return a
  
  
@@ -184,7 +213,7 @@
 #     cand_ids = _get_last_cand_task_ids(env)
 #     if cand_ids is None:
 #         # Fallback to greedy if no candidate IDs available
-#         return greedy_nearest_action(mask, R, NOOP)
+#         return greedy_nearest_action(mask, env, R, K_max, NOOP)
  
 #     chosen = set()
 #     a = np.full((R,), NOOP, dtype=np.int64)
@@ -235,11 +264,11 @@
 #     cand_ids = _get_last_cand_task_ids(env)
 #     a = np.full((R,), NOOP, dtype=np.int64)
 #     if cand_ids is None:
-#         return greedy_nearest_action(mask, R, NOOP)
+#         return greedy_nearest_action(mask, env, R, K_max, NOOP)
  
 #     tasks = getattr(env.unwrapped, "tasks", None)
 #     if tasks is None:
-#         return greedy_nearest_action(mask, R, NOOP)
+#         return greedy_nearest_action(mask, env, R, K_max, NOOP)
  
 #     for r in range(R):
 #         best_k, best_deadline, best_task_id = None, None, None
@@ -282,11 +311,11 @@
 #     cand_ids = _get_last_cand_task_ids(env)
 #     a = np.full((R,), NOOP, dtype=np.int64)
 #     if cand_ids is None:
-#         return greedy_nearest_action(mask, R, NOOP)
+#         return greedy_nearest_action(mask, env, R, K_max, NOOP)
  
 #     tasks = getattr(env.unwrapped, "tasks", None)
 #     if tasks is None:
-#         return greedy_nearest_action(mask, R, NOOP)
+#         return greedy_nearest_action(mask, env, R, K_max, NOOP)
  
 #     for r in range(R):
 #         best_k, best_deadline = None, None
@@ -320,7 +349,7 @@
 #     cand_ids = _get_last_cand_task_ids(env)
 #     a = np.full((R,), NOOP, dtype=np.int64)
 #     if cand_ids is None:
-#         return greedy_nearest_action(mask, R, NOOP)
+#         return greedy_nearest_action(mask, env, R, K_max, NOOP)
  
 #     base_env = env.unwrapped
 #     robot_ids = sorted(base_env.robots.keys())
@@ -356,7 +385,7 @@
 #     cand_ids = _get_last_cand_task_ids(env)
 #     a = np.full((R,), NOOP, dtype=np.int64)
 #     if cand_ids is None:
-#         return greedy_nearest_action(mask, R, NOOP)
+#         return greedy_nearest_action(mask, env, R, K_max, NOOP)
  
 #     base_env = env.unwrapped
 #     robot_ids = sorted(base_env.robots.keys())
@@ -414,7 +443,7 @@
 #     cand_ids = _get_last_cand_task_ids(env)
 #     a = np.full((R,), NOOP, dtype=np.int64)
 #     if cand_ids is None:
-#         return greedy_nearest_action(mask, R, NOOP)
+#         return greedy_nearest_action(mask, env, R, K_max, NOOP)
  
 #     base_env = env.unwrapped
 #     robot_ids = sorted(base_env.robots.keys())
@@ -533,7 +562,7 @@
 #                     robot_order = np.arange(R, dtype=int)
  
 #                 if policy_name == "greedy":
-#                     last_action = greedy_nearest_action(mask, R, NOOP)
+#                     last_action = greedy_nearest_action(mask, env, R, K_max, NOOP)
  
 #                 elif policy_name == "random":
 #                     last_action = random_valid_action(mask, R, NOOP, rng)
@@ -977,22 +1006,7 @@
 #     main()
 
 
-# ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
-# add predicted reward and simulkation for trght lien
-# ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
- 
-"""
-Evaluate baseline policies (random, greedy, unique) on MultiAgentTaskEnv.
- 
-Policies:
-- greedy: pick candidate slot 0 if valid, else NOOP
-- random: uniformly sample among all valid actions
-- unique: greedy with task deduplication using _last_cand_task_ids
-"""
+
 import argparse
 import json
 import sys
@@ -1106,7 +1120,7 @@ def _infer_decision_interval(env, config: Dict) -> int:
 def greedy_nearest_action(mask: np.ndarray, env, R: int, K_max: int, NOOP: int) -> np.ndarray:
     """
     Greedy policy: pick whichever valid candidate is ACTUALLY nearest.
-
+ 
     Looks up real distance via env instead of assuming slot 0 == nearest —
     that assumption only holds when the environment's candidates_sorting
     is 'distance' (the default). With candidates_sorting='randomized'
@@ -1119,10 +1133,10 @@ def greedy_nearest_action(mask: np.ndarray, env, R: int, K_max: int, NOOP: int) 
     a = np.full((R,), NOOP, dtype=np.int64)
     if cand_ids is None:
         return a
-
+ 
     base_env = env.unwrapped
     robot_ids = sorted(base_env.robots.keys())
-
+ 
     for r in range(R):
         if r >= len(robot_ids):
             continue
@@ -1143,7 +1157,7 @@ def greedy_nearest_action(mask: np.ndarray, env, R: int, K_max: int, NOOP: int) 
                 best_dist = dist
                 best_k = k
         a[r] = best_k if best_k is not None else NOOP
-
+ 
     return a
  
  
@@ -1905,6 +1919,7 @@ def main() -> None:
                     W_DEADLINE=config.get("W_DEADLINE", 10.0),
                     W_OBS=config.get("W_OBS", 1.0),
                     conflict_resolution=env_conflict_resolution,
+                    candidates_sorting=config.get("candidates_sorting", "distance"),
                 )
             except Exception as e:
                 print(f"  Error creating environment: {e}")

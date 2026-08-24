@@ -47,7 +47,7 @@ ppo_steps: 256        # was 1024 — matches reference's n_steps
 batch_size: 64
 learning_rate: 0.0003
 ent_coef: 0.003        # was 0.008 — matches reference
-total_timesteps: 200000  
+total_timesteps: 10000  
 max_steps: 3000        # was 2500 — matches reference
 gamma: 0.99
 clip_range: 0.2
@@ -55,7 +55,7 @@ vf_coef: 0.35           # was 0.5 — matches reference
 gae_lambda: 0.95
 n_epochs: 5
 max_grad_norm: 0.5
-
+target_kl: 0.03 
 # Policy Parameter
 hidden: 128
 logit_temperature: 1.0   # already matched
@@ -64,4 +64,4 @@ freeze_noop_logit: false
 noop_mode: state_dependent  
 
 #experiments
-seeds: [42, 123, 456] #[42, 123, 456]
+seeds: [42] #[42, 123, 456]
