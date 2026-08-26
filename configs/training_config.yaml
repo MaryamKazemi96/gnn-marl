@@ -1,67 +1,5 @@
-# # Robot Parameters
-# max_robot_capacity: 3
-# max_wait_delay_s:   300.0
-# max_travel_delay_s: 100.0
-# movement_spee: 1.0
-# capacity_method: "assigned"
 
-
-# # Reward
-# W_COMP: 2.0
-# W_WAIT: 1.5
-# W_DEADLINE: 15.0 #10.0
-# W_OBS: 5.0 #4.0
-
-# # Environment parameters
-# num_robots: 6
-# num_tasks: 40
-# vicinity_m: 40
-# batch_time: 180
-# decision_interval: 8  # Steps between policy decisions
-# conflict_resolution: predicted_reward_joint # greedy | random | hungarian
-
-# # Graph parameters
-# K_max: 3             # Max candidate tasks per robot
-# N_max: 16             # Max nodes in ego-graph
-# E_max: 64             # Max edges in ego-graph
-# two_hop: True
-# use_xy_pickup: False
-# normalize_features: True
-# use_node_type: True
-# use_ego_robot: True
-# use_edge_rt: True
-# two_hop_directed: True
-
-# use_node_type: true
-# use_ego_robot: true
-# use_edge_rt: true
-
-# # PPO parameters
-# ppo_steps: 256
-# batch_size: 64
-# learning_rate: 0.0003
-# ent_coef: 0.003
-# total_timesteps: 150000
-# max_steps: 2500
-# gamma: 0.99
-# clip_range: 0.2
-# vf_coef: 0.3
-# gae_lambda: 0.95
-# n_epochs: 5
-# max_grad_norm: 0.5
-
-# # Policy Parameter
-# hidden: 128
-# logit_temperature: 1.0
-# noop_init: -1.0
-# freeze_noop_logit: false
-# #experiments
-# seeds: [42] #[42, 123, 456]
-
-# use_predicted_score: true
-
-# Robot Parameters
-max_robot_capacity: 2        # was 3 — matches reference's cap2 configs
+max_robot_capacity: 3        # was 3 — matches reference's cap2 configs
 max_wait_delay_s:   300.0    # already matched
 max_travel_delay_s: 240.0    # was 100.0 — matches reference
 movement_spee: 1.0
@@ -130,4 +68,6 @@ noop_init: -1.0
 freeze_noop_logit: false
 noop_mode: state_dependent  
 #experiments
-seeds: [42, 123, 456] 
+seeds:
+  train: [100, 200, 300]
+  eval: [42, 123, 456, 789]

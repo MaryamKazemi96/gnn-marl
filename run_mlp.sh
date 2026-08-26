@@ -3,7 +3,7 @@ set -e
  
 CONFIG="configs/training_config_mlp.yaml"
 EPISODES=50
-SEEDS=(42)
+SEEDS=(100, 200, 300)
  
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RUN_ID="${TIMESTAMP}/mlp"

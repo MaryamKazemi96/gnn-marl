@@ -3,7 +3,7 @@
 backbone: dummy
 
 # Robot Parameters
-max_robot_capacity: 2        # was 3 — matches reference's cap2 configs
+max_robot_capacity: 3        # was 3 — matches reference's cap2 configs
 max_wait_delay_s:   300.0    # already matched
 max_travel_delay_s: 240.0    # was 100.0 — matches reference
 movement_spee: 1.0
@@ -47,7 +47,7 @@ ppo_steps: 256        # was 1024 — matches reference's n_steps
 batch_size: 64
 learning_rate: 0.0003
 ent_coef: 0.003        # was 0.008 — matches reference
-total_timesteps: 10000  
+total_timesteps: 200000  
 max_steps: 3000        # was 2500 — matches reference
 gamma: 0.99
 clip_range: 0.2
@@ -64,4 +64,6 @@ freeze_noop_logit: false
 noop_mode: state_dependent  
 
 #experiments
-seeds: [42] #[42, 123, 456]
+seeds:
+  train: [100, 200, 300]
+  eval: [42, 123, 456]
