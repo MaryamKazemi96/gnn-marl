@@ -3,7 +3,7 @@ set -e
  
 CONFIG="configs/training_config_mlp.yaml"
 EPISODES=50
-SEEDS=(100, 200, 300)
+SEEDS=(100 200)
  
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RUN_ID="${TIMESTAMP}/mlp"
@@ -21,7 +21,7 @@ python3 eval_baseline.py --config "$CONFIG" --episodes $EPISODES --all-seeds --r
  
 echo "[mlp] Plotting training..."
 for s in "${SEEDS[@]}"; do
-    python3 plot_training.py --seed "$s" --run-id "$RUN_ID"
+    python3 plot_training.py --seed "$s" --run-id "$RUN_ID" 
 done
  
 echo "[mlp] Evaluating PPO..."

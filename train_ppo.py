@@ -1,3 +1,4 @@
+
 # import os
 # import sys
 # import json
@@ -127,14 +128,30 @@
  
  
 # def get_seed_list(config: Dict) -> List[int]:
-#     # Preferred: seeds: [1,2,3]
-#     if "seeds" in config and config["seeds"] is not None:
-#         seeds = [int(s) for s in config["seeds"]]
-#         if len(seeds) == 0:
-#             raise ValueError("Config key 'seeds' is empty.")
-#         return seeds
+#     """Which seeds to TRAIN independent models under. Reads config's
+#     seeds.train — see get_eval_seeds() for the separate pool used only
+#     for evaluation randomization."""
+#     seeds_cfg = config.get("seeds")
+#     if isinstance(seeds_cfg, dict) and seeds_cfg.get("train"):
+#         return [int(s) for s in seeds_cfg["train"]]
+#     # Legacy: seeds: [1,2,3] (flat list, pre train/eval split) — used for
+#     # both training AND evaluation, matching the old undifferentiated behavior.
+#     if isinstance(seeds_cfg, list) and seeds_cfg:
+#         return [int(s) for s in seeds_cfg]
 #     # Fallback: seed: 42
 #     return [int(config.get("seed", 42))]
+
+
+# def get_eval_seeds(config: Dict) -> List[int]:
+#     """Which seeds to use for environment randomization during EVALUATION
+#     (of both PPO and baselines) — a separate pool from get_seed_list()'s
+#     training seeds, so evaluation never reuses the exact seed a model
+#     trained under. Falls back to the training seeds themselves only for
+#     configs that still use the old flat 'seeds: [...]' format."""
+#     seeds_cfg = config.get("seeds")
+#     if isinstance(seeds_cfg, dict) and seeds_cfg.get("eval"):
+#         return [int(s) for s in seeds_cfg["eval"]]
+#     return get_seed_list(config)
  
 # # ============================================================================
 # # Callbacks
@@ -784,7 +801,7 @@ import random
  
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
+from stable_baselines3.common.callbacks import BaseCallback, EvalCallback, StopTrainingOnNoModelImprovement
  
 from src.environment.environment import MultiAgentTaskEnv
 from src.models.sb3_gnn_policy import RTGNNPolicy, compute_all_action_logit_stats
@@ -896,6 +913,17 @@ def set_global_seed(seed: int):
     # Keep minimal changes; no forced deterministic flags unless you want strict reproducibility.
  
  
+# def get_seed_list(config: Dict) -> List[int]:
+#     # Preferred: seeds: [1,2,3]
+#     if "seeds" in config and config["seeds"] is not None:
+#         seeds = [int(s) for s in config["seeds"]]
+#         if len(seeds) == 0:
+#             raise ValueError("Config key 'seeds' is empty.")
+#         return seeds
+#     # Fallback: seed: 42
+#     return [int(config.get("seed", 42))]
+
+
 def get_seed_list(config: Dict) -> List[int]:
     """Which seeds to TRAIN independent models under. Reads config's
     seeds.train — see get_eval_seeds() for the separate pool used only
@@ -921,7 +949,7 @@ def get_eval_seeds(config: Dict) -> List[int]:
     if isinstance(seeds_cfg, dict) and seeds_cfg.get("eval"):
         return [int(s) for s in seeds_cfg["eval"]]
     return get_seed_list(config)
- 
+
 # ============================================================================
 # Callbacks
 # ============================================================================
@@ -952,15 +980,6 @@ class TrainingLogCallback(BaseCallback):
         self._core_step_buffer = []  # LogitStepMetrics, this episode (reference-matching schema)
         self._rank_step_buffer = []  # compute_all_action_logit_stats() dicts, this episode
 
-        # Edge-feature sanity check (mirrors the reference repo's
-        # rp_logger_callback.py _edge_sum/_edge_sumsq/_edge_min/_edge_max
-        # pattern) — logged ONCE, early in training, not continuously.
-        # Purpose: catch a degenerate/broken edge feature (e.g. constant
-        # zero, unnormalized, NaN) before sinking hours into a 200k-step
-        # run on top of it. Dynamically sized to whatever edge_attr's last
-        # dimension actually is at runtime, rather than the reference's
-        # hardcoded 3 — so this stays correct regardless of exactly which
-        # edge_features your config lists.
         self._edge_stats_initialized = False
         self._edge_sum = None
         self._edge_sumsq = None
@@ -984,9 +1003,6 @@ class TrainingLogCallback(BaseCallback):
     def _on_step(self) -> bool:
         self.step_count += 1
  
-        # Capture logit diagnostics EVERY step (not gated by log_freq) since
-        # these need to accumulate correctly for the per-episode aggregate —
-        # gating would silently undercount episodes shorter than log_freq.
         new_obs = self.locals.get("new_obs")
         if new_obs is not None:
             if self.logit_metrics_log_path:
@@ -1118,15 +1134,7 @@ class TrainingLogCallback(BaseCallback):
                 print(f"[WARN] Edge feature stats contain NaN/inf — check edge_attr computation.")
             self._edge_logged = True
 
-        # Per-rollout noop_logit snapshot — mirrors the reference repo's
-        # noop_logit.log (one line per rollout), so you can see directly
-        # whether/how the noop bias moves over training, whether or not
-        # freeze_noop_logit is set.
-        #
-        # 8 decimal places deliberately: with lr~3e-4 and possibly
-        # near-cancelling advantage-weighted gradients, real movement can
-        # sit in the 4th-5th decimal — invisible at the default float
-        # precision and on a plot whose y-axis spans several full units.
+
         if self.noop_log_path:
             noop_logit_value = float(self.model.policy.noop_logit.item())
             os.makedirs(os.path.dirname(os.path.abspath(self.noop_log_path)) or ".", exist_ok=True)
@@ -1412,6 +1420,37 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
 
     best_model_cb = None
     if eval_env_for_best is not None:
+        # Convergence-based stopping (config: converge_on_plateau: true), in
+        # addition to best-checkpoint tracking above. total_timesteps below
+        # becomes an UPPER BOUND rather than a fixed target: training stops
+        # early once the periodic eval reward hasn't improved for
+        # `no_improvement_patience` consecutive checks, or runs all the way
+        # to total_timesteps if it never plateaus.
+        #
+        # Patience is deliberately generous by default (15 evals, each
+        # spaced checkpoint_freq//5 apart — i.e. up to ~3x checkpoint_freq
+        # of genuinely flat reward before stopping). This was a deliberate
+        # choice after looking at real training curves for this environment
+        # (both GNN and MLP, multiple seeds): every one of them showed
+        # substantial dips-and-recoveries throughout training (drops of
+        # 10+ reward points that fully recovered 20-50k steps later), not
+        # a clean monotonic climb to a flat plateau. A short-patience
+        # criterion (e.g. stop after 3 non-improving evals) would almost
+        # certainly trigger during one of these ordinary dips and mistake
+        # temporary regression for convergence — so patience here is set
+        # high enough to ride out that kind of noise, at the cost of
+        # potentially running a bit longer than strictly necessary once a
+        # run has genuinely converged. min_evals adds a grace period before
+        # early stopping can trigger at all, since early training is
+        # noisiest and most likely to have a false plateau.
+        stop_cb = None
+        if config.get("converge_on_plateau", False):
+            stop_cb = StopTrainingOnNoModelImprovement(
+                max_no_improvement_evals=config.get("no_improvement_patience", 15),
+                min_evals=config.get("no_improvement_min_evals", 10),
+                verbose=1,
+            )
+
         best_model_cb = EvalCallback(
             eval_env_for_best,
             best_model_save_path=str(model_dir),   # writes model_dir/best_model.zip
@@ -1421,6 +1460,7 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
             deterministic=True,
             render=False,
             verbose=1,
+            callback_after_eval=stop_cb,
         )
 
     logit_metrics_log_path = str(log_dir / "training_logit_metrics.log")       # reference-schema (best-vs-noop)

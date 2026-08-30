@@ -47,7 +47,7 @@ ppo_steps: 256        # was 1024 — matches reference's n_steps
 batch_size: 64
 learning_rate: 0.0003
 ent_coef: 0.003        # was 0.008 — matches reference
-total_timesteps: 200000  
+# total_timesteps: 200000  
 max_steps: 3000        # was 2500 — matches reference
 gamma: 0.99
 clip_range: 0.2
@@ -65,5 +65,11 @@ noop_mode: state_dependent
 
 #experiments
 seeds:
-  train: [100, 200, 300]
+  train: [100, 200]
   eval: [42, 123, 456]
+
+converge_on_plateau: true
+no_improvement_patience: 30    # consecutive non-improving evals before stopping
+no_improvement_min_evals: 20   # grace period before early stop can trigger at all
+total_timesteps: 650000       # now an UPPER BOUND, not a target — raise this well above 200k
+checkpoint_freq: 50000         # unchanged, but note eval_freq = checkpoint_freq // 5 = 10000
