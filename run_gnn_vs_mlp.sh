@@ -7,7 +7,7 @@ EPISODES=50
 SEEDS=(100 200)
 
 CONFIGS=(
-    # "gnn:configs/training_config.yaml"
+    "gnn:configs/training_config.yaml"
     "mlp:configs/training_config_mlp.yaml"
 )
 

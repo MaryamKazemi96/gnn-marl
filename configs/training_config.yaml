@@ -76,5 +76,5 @@ seeds:
 converge_on_plateau: true
 no_improvement_patience: 30    # consecutive non-improving evals before stopping
 no_improvement_min_evals: 20   # grace period before early stop can trigger at all
-total_timesteps: 1000000       # now an UPPER BOUND, not a target — raise this well above 200k
+total_timesteps: 6500000       # now an UPPER BOUND, not a target — raise this well above 200k
 checkpoint_freq: 50000         # unchanged, but note eval_freq = checkpoint_freq // 5 = 10000
