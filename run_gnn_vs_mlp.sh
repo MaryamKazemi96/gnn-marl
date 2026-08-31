@@ -4,10 +4,10 @@
 set -e
 
 EPISODES=50
-SEEDS=(100 200)
+SEEDS=(100)
 
 CONFIGS=(
-    "gnn:configs/training_config.yaml"
+    # "gnn:configs/training_config.yaml"
     "mlp:configs/training_config_mlp.yaml"
 )
 
@@ -48,11 +48,11 @@ for entry in "${CONFIGS[@]}"; do
     python3 eval_ppo.py --all-seeds --episodes $EPISODES --run-id "$run_id"
 
     echo "[$name] Plotting evaluation results..."
-    # python3 plot_eval.py \
-    #     --all-seeds \
-    #     --run-id "$run_id" \
-    #     --baseline-dir baseline_results \
-    #     --ma-window 5
+    python3 plot_eval.py \
+        --all-seeds \
+        --run-id "$run_id" \
+        --baseline-dir baseline_results \
+        --ma-window 5
 
     COMPARISON_ARGS+=(--resolver "${name}:${run_id}")
 

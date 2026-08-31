@@ -65,11 +65,11 @@ noop_mode: state_dependent
 
 #experiments
 seeds:
-  train: [100, 200]
+  train: [100]
   eval: [42, 123, 456]
 
 converge_on_plateau: true
 no_improvement_patience: 30    # consecutive non-improving evals before stopping
 no_improvement_min_evals: 20   # grace period before early stop can trigger at all
-total_timesteps: 650000       # now an UPPER BOUND, not a target — raise this well above 200k
+total_timesteps: 400000       # now an UPPER BOUND, not a target — raise this well above 200k
 checkpoint_freq: 50000         # unchanged, but note eval_freq = checkpoint_freq // 5 = 10000

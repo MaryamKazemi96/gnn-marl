@@ -1,5 +1,4 @@
 
-
 # """
 # Evaluate trained GNN-PPO model (deterministic + stochastic)
 # Clean + robust + debug metrics
@@ -22,6 +21,7 @@
  
 # from src.environment.environment import MultiAgentTaskEnv
 # from src.models.sb3_gnn_policy import RTGNNPolicy
+# from train_ppo import get_eval_seeds
  
  
 # # =========================================================
@@ -192,6 +192,123 @@
 # # Evaluation core
 # # =========================================================
  
+# def _stats_from_raw(raw: dict) -> dict:
+#     """Compute the 'stats' summary dict from raw per-episode arrays — shared
+#     by run_eval() (single eval seed) and run_eval_across_seeds() (pooled
+#     across multiple eval seeds), so both produce the exact same stats
+#     shape/semantics regardless of how many seeds' episodes went into it."""
+#     rewards = raw["rewards"]
+#     r = np.array(rewards, dtype=float)
+#     completed = raw["completed"]
+#     obsolete = raw["obsolete"]
+#     noop_fractions = raw["noop_fractions"]
+#     ticks = raw["ticks"]
+#     ep_mask_zeros = raw["ep_mask_zero_count"]
+#     ep_r_comp = raw["ep_r_comp"]
+#     ep_r_wait = raw["ep_r_wait"]
+#     ep_r_deadline = raw["ep_r_deadline"]
+#     ep_r_obsolete = raw["ep_r_obsolete"]
+#     ep_invalids = raw["ep_invalid_action_count"]
+#     ep_totals = raw["ep_total_action_count"]
+#     ep_conflicts = raw["ep_conflict_dropped_count"]
+#     ep_capacity_rej = raw["ep_capacity_rejected_count"]
+#     ep_noop_forced = raw["ep_noop_forced_count"]
+#     ep_noop_chosen = raw["ep_noop_chosen_count"]
+#     ep_had_candidates = raw["ep_had_candidates_count"]
+#     ep_decisions = raw["ep_decisions_total"]
+
+#     total_actions_all = int(np.sum(ep_totals)) if ep_totals else 0
+#     invalid_all = int(np.sum(ep_invalids)) if ep_invalids else 0
+#     conflict_all = int(np.sum(ep_conflicts)) if ep_conflicts else 0
+#     caprej_all = int(np.sum(ep_capacity_rej)) if ep_capacity_rej else 0
+
+#     invalid_rate = (invalid_all / total_actions_all) if total_actions_all > 0 else 0.0
+#     conflict_rate = (conflict_all / total_actions_all) if total_actions_all > 0 else 0.0
+#     caprej_rate = (caprej_all / total_actions_all) if total_actions_all > 0 else 0.0
+
+#     decisions_all      = int(np.sum(ep_decisions)) if ep_decisions else 0
+#     noop_forced_all    = int(np.sum(ep_noop_forced)) if ep_noop_forced else 0
+#     noop_chosen_all    = int(np.sum(ep_noop_chosen)) if ep_noop_chosen else 0
+#     had_candidates_all = int(np.sum(ep_had_candidates)) if ep_had_candidates else 0
+
+#     noop_frac_forced_rate = (noop_forced_all / decisions_all) if decisions_all > 0 else 0.0
+#     noop_frac_chosen_rate = (noop_chosen_all / decisions_all) if decisions_all > 0 else 0.0
+#     chosen_noop_rate_when_available = (
+#         noop_chosen_all / had_candidates_all if had_candidates_all > 0 else 0.0
+#     )
+
+#     return {
+#         "reward_mean": float(r.mean()) if len(r) else 0.0,
+#         "reward_std": float(r.std()) if len(r) else 0.0,
+#         "min": float(r.min()) if len(r) else 0.0,
+#         "max": float(r.max()) if len(r) else 0.0,
+#         "completed": float(np.mean(completed)) if completed else 0.0,
+#         "obsolete": float(np.mean(obsolete)) if obsolete else 0.0,
+#         "noop_frac_mean": float(np.mean(noop_fractions)) if noop_fractions else 0.0,
+#         "ticks_mean": float(np.mean(ticks)) if ticks else 0.0,
+
+#         "invalid_action_total": invalid_all,
+#         "total_action_count": total_actions_all,
+#         "invalid_action_rate": float(invalid_rate),
+#         "conflict_drop_rate": float(conflict_rate),
+#         "capacity_reject_rate": float(caprej_rate),
+#         "mask_zero_mean": float(np.mean(ep_mask_zeros)) if ep_mask_zeros else 0.0,
+
+#         "r_comp_mean": float(np.mean(ep_r_comp)) if ep_r_comp else 0.0,
+#         "r_wait_mean": float(np.mean(ep_r_wait)) if ep_r_wait else 0.0,
+#         "r_deadline_mean": float(np.mean(ep_r_deadline)) if ep_r_deadline else 0.0,
+#         "r_obsolete_mean": float(np.mean(ep_r_obsolete)) if ep_r_obsolete else 0.0,
+
+#         "noop_frac_forced": float(noop_frac_forced_rate),
+#         "noop_frac_chosen": float(noop_frac_chosen_rate),
+#         "chosen_noop_rate_when_available": float(chosen_noop_rate_when_available),
+#         "decisions_total": decisions_all,
+#         "had_candidates_total": had_candidates_all,
+#     }
+
+
+# def _merge_raw(raw_list: List[dict]) -> dict:
+#     """Concatenate every list-valued field across multiple run_eval() raw
+#     outputs (one per eval seed) — used to pool episodes from every eval
+#     seed together before computing stats, so reward_mean/std reflect the
+#     FULL eval_seeds pool, not one seed's episodes averaged with another's
+#     already-averaged summary."""
+#     if not raw_list:
+#         raise ValueError("_merge_raw got an empty list")
+#     merged = {}
+#     for key in raw_list[0].keys():
+#         merged[key] = []
+#         for raw in raw_list:
+#             merged[key].extend(raw[key])
+#     return merged
+
+
+# def run_eval_across_seeds(model, agents, tasks, config, eval_seeds: List[int],
+#                            episodes_per_seed: int, deterministic: bool):
+#     """Runs run_eval() once per eval seed (genuinely different environment
+#     randomization each time — see get_eval_seeds() in train_ppo.py), pools
+#     every episode from every eval seed together, and computes stats over
+#     that pooled set. This is what 'reward_mean/reward_std' now actually
+#     means for a single trained model's evaluation: mean/std across
+#     len(eval_seeds) * episodes_per_seed episodes, not just one arbitrary
+#     eval seed's episodes."""
+#     raw_per_seed = []
+#     for es in eval_seeds:
+#         env = make_env(agents, tasks, config, es)
+#         if config.get("conflict_resolution") == "hungarian_bids":
+#             model.policy._bid_env = env
+#         raw = run_eval(model, env, episodes_per_seed, deterministic)
+#         env.close()
+#         raw["eval_seed"] = [es] * episodes_per_seed  # tag each episode with which eval seed produced it
+#         raw_per_seed.append(raw)
+
+#     merged = _merge_raw(raw_per_seed)
+#     merged["stats"] = _stats_from_raw(merged)
+#     merged["stats"]["eval_seeds_used"] = list(eval_seeds)
+#     merged["stats"]["episodes_per_eval_seed"] = episodes_per_seed
+#     return merged
+
+
 # def run_eval(model, env, episodes, deterministic):
 #     rewards, lengths, ticks, completed, obsolete = [], [], [], [], []
 #     noop_fractions, action_hists = [], []
@@ -280,29 +397,7 @@
 #         ep_had_candidates.append(had_cand_sum)
 #         ep_decisions.append(decisions_sum)
  
-#     r = np.array(rewards, dtype=float)
- 
-#     total_actions_all = int(np.sum(ep_totals))
-#     invalid_all = int(np.sum(ep_invalids))
-#     conflict_all = int(np.sum(ep_conflicts))
-#     caprej_all = int(np.sum(ep_capacity_rej))
- 
-#     invalid_rate = (invalid_all / total_actions_all) if total_actions_all > 0 else 0.0
-#     conflict_rate = (conflict_all / total_actions_all) if total_actions_all > 0 else 0.0
-#     caprej_rate = (caprej_all / total_actions_all) if total_actions_all > 0 else 0.0
- 
-#     decisions_all      = int(np.sum(ep_decisions))
-#     noop_forced_all    = int(np.sum(ep_noop_forced))
-#     noop_chosen_all    = int(np.sum(ep_noop_chosen))
-#     had_candidates_all = int(np.sum(ep_had_candidates))
- 
- 
-#     noop_frac_forced_rate = (noop_forced_all / decisions_all) if decisions_all > 0 else 0.0
-#     noop_frac_chosen_rate = (noop_chosen_all / decisions_all) if decisions_all > 0 else 0.0
-#     chosen_noop_rate_when_available = (
-#         noop_chosen_all / had_candidates_all if had_candidates_all > 0 else 0.0
-#     )
-#     return {
+#     raw = {
 #         "rewards": rewards,
 #         "lengths": lengths,
 #         "ticks": ticks,
@@ -310,55 +405,26 @@
 #         "obsolete": obsolete,
 #         "noop_fractions": noop_fractions,
 #         "action_hists": action_hists,
- 
-#         # new debug arrays (per episode)
+
 #         "ep_invalid_action_count": ep_invalids,
 #         "ep_total_action_count": ep_totals,
 #         "ep_valid_action_count": ep_valids,
 #         "ep_conflict_dropped_count": ep_conflicts,
 #         "ep_capacity_rejected_count": ep_capacity_rej,
 #         "ep_mask_zero_count": ep_mask_zeros,
- 
+
 #         "ep_r_comp": ep_r_comp,
 #         "ep_r_wait": ep_r_wait,
 #         "ep_r_deadline": ep_r_deadline,
 #         "ep_r_obsolete": ep_r_obsolete,
- 
+
 #         "ep_noop_forced_count": ep_noop_forced,
 #         "ep_noop_chosen_count": ep_noop_chosen,
 #         "ep_had_candidates_count": ep_had_candidates,
 #         "ep_decisions_total": ep_decisions,
- 
-#         "stats": {
-#             "reward_mean": float(r.mean()),
-#             "reward_std": float(r.std()),
-#             "min": float(r.min()),
-#             "max": float(r.max()),
-#             "completed": float(np.mean(completed)),
-#             "obsolete": float(np.mean(obsolete)),
-#             "noop_frac_mean": float(np.mean(noop_fractions)) if noop_fractions else 0.0,
-#             "ticks_mean": float(np.mean(ticks)) if ticks else 0.0,
- 
-#             # debug summary
-#             "invalid_action_total": invalid_all,
-#             "total_action_count": total_actions_all,
-#             "invalid_action_rate": float(invalid_rate),
-#             "conflict_drop_rate": float(conflict_rate),
-#             "capacity_reject_rate": float(caprej_rate),
-#             "mask_zero_mean": float(np.mean(ep_mask_zeros)) if ep_mask_zeros else 0.0,
- 
-#             "r_comp_mean": float(np.mean(ep_r_comp)) if ep_r_comp else 0.0,
-#             "r_wait_mean": float(np.mean(ep_r_wait)) if ep_r_wait else 0.0,
-#             "r_deadline_mean": float(np.mean(ep_r_deadline)) if ep_r_deadline else 0.0,
-#             "r_obsolete_mean": float(np.mean(ep_r_obsolete)) if ep_r_obsolete else 0.0,
- 
-#             "noop_frac_forced": float(noop_frac_forced_rate),
-#             "noop_frac_chosen": float(noop_frac_chosen_rate),
-#             "chosen_noop_rate_when_available": float(chosen_noop_rate_when_available),
-#             "decisions_total": decisions_all,
-#             "had_candidates_total": had_candidates_all,
-#         }
 #     }
+#     raw["stats"] = _stats_from_raw(raw)
+#     return raw
  
  
 # # =========================================================
@@ -370,8 +436,19 @@
 # # =========================================================
  
 # def evaluate_one_seed(seed: int, run_dir: Path, config: Dict, agents, tasks,
-#                        episodes: int, output_override: str = None):
-#     print(f"\n---- seed {seed} ----")
+#                        episodes_per_eval_seed: int, output_override: str = None,
+#                        eval_seeds: Optional[List[int]] = None):
+#     """seed here is the TRAIN seed (which trained model to load — see
+#     run_dir). eval_seeds is the SEPARATE pool used for environment
+#     randomization during evaluation (get_eval_seeds() in train_ppo.py) —
+#     every configured eval seed gets episodes_per_eval_seed episodes, and
+#     ALL of them get pooled together into one reward_mean/reward_std, for
+#     both deterministic and stochastic readout. Falls back to [seed] if no
+#     eval_seeds are given, matching the old single-seed behavior."""
+#     if eval_seeds is None:
+#         eval_seeds = [seed]
+
+#     print(f"\n---- train seed {seed} | eval seeds {eval_seeds} ----")
 #     print(" Selected run:", run_dir)
  
 #     model_path = pick_model(run_dir)
@@ -386,23 +463,11 @@
 #     )
 #     print("✓ Loaded model\n")
  
-#     print("Running deterministic...")
-#     env_det = make_env(agents, tasks, config, seed)
-#     if config.get("conflict_resolution") == "hungarian_bids":
-#         # Same wiring train_ppo.py does after model construction — forward()
-#         # needs a live reference to THIS eval run's env to push logits into
-#         # before step(actions). Must be re-set per env (det/stoch are
-#         # separate VecEnv instances), not just once for the whole model.
-#         model.policy._bid_env = env_det
-#     det = run_eval(model, env_det, episodes, True)
-#     env_det.close()
+#     print(f"Running deterministic across {len(eval_seeds)} eval seed(s)...")
+#     det = run_eval_across_seeds(model, agents, tasks, config, eval_seeds, episodes_per_eval_seed, True)
  
-#     print("Running stochastic...")
-#     env_sto = make_env(agents, tasks, config, seed + 1)
-#     if config.get("conflict_resolution") == "hungarian_bids":
-#         model.policy._bid_env = env_sto
-#     sto = run_eval(model, env_sto, episodes, False)
-#     env_sto.close()
+#     print(f"Running stochastic across {len(eval_seeds)} eval seed(s)...")
+#     sto = run_eval_across_seeds(model, agents, tasks, config, eval_seeds, episodes_per_eval_seed, False)
  
 #     out = Path(output_override) if output_override else (run_dir / "eval_results")
 #     out.mkdir(parents=True, exist_ok=True)
@@ -417,10 +482,12 @@
 #     save_json(debug_summary, out / "debug_summary.json")
  
 #     print("\n============================")
-#     print(f"RESULTS — seed {seed}")
+#     print(f"RESULTS — train seed {seed}  (pooled across eval seeds {eval_seeds})")
 #     print("============================")
-#     print(f"Deterministic: {det['stats']['reward_mean']:.2f} ± {det['stats']['reward_std']:.2f}")
-#     print(f"Stochastic:    {sto['stats']['reward_mean']:.2f} ± {sto['stats']['reward_std']:.2f}")
+#     print(f"Deterministic: {det['stats']['reward_mean']:.2f} ± {det['stats']['reward_std']:.2f}  "
+#           f"(n={len(det['rewards'])} episodes)")
+#     print(f"Stochastic:    {sto['stats']['reward_mean']:.2f} ± {sto['stats']['reward_std']:.2f}  "
+#           f"(n={len(sto['rewards'])} episodes)")
 #     print(f"Det invalid rate: {det['stats']['invalid_action_rate']:.4f} | caprej: {det['stats']['capacity_reject_rate']:.4f} | conflict: {det['stats']['conflict_drop_rate']:.4f}")
 #     print(f"Sto invalid rate: {sto['stats']['invalid_action_rate']:.4f} | caprej: {sto['stats']['capacity_reject_rate']:.4f} | conflict: {sto['stats']['conflict_drop_rate']:.4f}")
 #     print(f"\nSaved → {out}\n")
@@ -476,7 +543,9 @@
 #                      help="Evaluate every seed_* trained in this sweep (runs/run_{id}/seed_*/) "
 #                           "instead of just one, writing results into each seed's own eval_results/.")
 #     ap.add_argument("--data-dir", default="data")
-#     ap.add_argument("--episodes", type=int, default=50)
+#     ap.add_argument("--episodes", type=int, default=50,
+#                      help="Episodes PER EVAL SEED (see configs' seeds.eval) — total episodes "
+#                           "pooled per train seed's det/stoch result = episodes * len(seeds.eval).")
 #     ap.add_argument("--output", type=str, default=None,
 #                     help="Optional override output dir (defaults to run_dir/eval_results). "
 #                          "Ignored (per-seed subfolders used instead) when --all-seeds is set.")
@@ -495,23 +564,30 @@
  
 #     if args.all_seeds:
 #         seed_dirs = all_seed_dirs_in_run(args.run_id)
-#         print(f"Evaluating {len(seed_dirs)} seeds: {[d.name for d in seed_dirs]}")
+#         print(f"Evaluating {len(seed_dirs)} train seeds: {[d.name for d in seed_dirs]}")
 #         results = {}
 #         for seed_dir in seed_dirs:
 #             seed = int(seed_dir.name.replace("seed_", ""))
 #             set_seed(seed)
 #             config = load_run_config(seed_dir, args.config, args.conflict_resolution)
-#             det, sto = evaluate_one_seed(seed, seed_dir, config, agents, tasks, args.episodes)
+#             eval_seeds = get_eval_seeds(config)
+#             det, sto = evaluate_one_seed(seed, seed_dir, config, agents, tasks, args.episodes,
+#                                           eval_seeds=eval_seeds)
 #             results[seed] = {"det_mean": det["stats"]["reward_mean"], "sto_mean": sto["stats"]["reward_mean"]}
  
 #         print("\n============================")
-#         print("SWEEP SUMMARY (all seeds)")
+#         print("SWEEP SUMMARY (across train seeds)")
 #         print("============================")
+#         print("Each train seed's det/sto number below is ALREADY pooled across every "
+#               "configured eval seed (see per-seed output above) — this final line "
+#               "aggregates those pooled numbers ACROSS the independently trained models, "
+#               "which is a genuinely different kind of variance (model-to-model), not "
+#               "episode-to-episode noise.")
 #         for seed, r in results.items():
-#             print(f"seed {seed:>4}: det={r['det_mean']:8.2f}  sto={r['sto_mean']:8.2f}")
+#             print(f"train seed {seed:>4}: det={r['det_mean']:8.2f}  sto={r['sto_mean']:8.2f}")
 #         det_means = [r["det_mean"] for r in results.values()]
 #         sto_means = [r["sto_mean"] for r in results.values()]
-#         print(f"\nAcross seeds — det: {np.mean(det_means):.2f} ± {np.std(det_means):.2f} | "
+#         print(f"\nAcross train seeds — det: {np.mean(det_means):.2f} ± {np.std(det_means):.2f} | "
 #               f"sto: {np.mean(sto_means):.2f} ± {np.std(sto_means):.2f}")
 #         return
  
@@ -522,11 +598,25 @@
 #         run_dir = find_latest_run(args.seed, args.run_id)
  
 #     config = load_run_config(run_dir, args.config, args.conflict_resolution)
-#     evaluate_one_seed(args.seed, run_dir, config, agents, tasks, args.episodes, args.output)
+#     eval_seeds = get_eval_seeds(config)
+#     evaluate_one_seed(args.seed, run_dir, config, agents, tasks, args.episodes, args.output,
+#                        eval_seeds=eval_seeds)
  
  
 # if __name__ == "__main__":
 #     main()
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -668,6 +758,8 @@ def make_env(agents, tasks, config, seed):
             W_OBS=config.get("W_OBS", 1.0),
             conflict_resolution=config.get("conflict_resolution", "greedy"),
             candidates_sorting=config.get("candidates_sorting", "distance"),
+            reward_type=config.get("reward_type", "legacy"),
+            W_TRAVEL=config.get("W_TRAVEL", 1.25),
         )
         env.reset(seed=seed)
         return env
@@ -697,7 +789,7 @@ def pick_model(run_dir: Path, prefer_best: bool = True) -> Path:
         print(f"⚠️  No best_model.zip found at {best} — this run may predate "
               f"the best-checkpoint-tracking EvalCallback, or it was disabled. "
               f"Falling back to ppo_final.zip.")
-
+ 
     # prefer ppo_final
     final = run_dir / "ppo_final.zip"
     print("Looking for final model:", final)
@@ -750,27 +842,27 @@ def _stats_from_raw(raw: dict) -> dict:
     ep_noop_chosen = raw["ep_noop_chosen_count"]
     ep_had_candidates = raw["ep_had_candidates_count"]
     ep_decisions = raw["ep_decisions_total"]
-
+ 
     total_actions_all = int(np.sum(ep_totals)) if ep_totals else 0
     invalid_all = int(np.sum(ep_invalids)) if ep_invalids else 0
     conflict_all = int(np.sum(ep_conflicts)) if ep_conflicts else 0
     caprej_all = int(np.sum(ep_capacity_rej)) if ep_capacity_rej else 0
-
+ 
     invalid_rate = (invalid_all / total_actions_all) if total_actions_all > 0 else 0.0
     conflict_rate = (conflict_all / total_actions_all) if total_actions_all > 0 else 0.0
     caprej_rate = (caprej_all / total_actions_all) if total_actions_all > 0 else 0.0
-
+ 
     decisions_all      = int(np.sum(ep_decisions)) if ep_decisions else 0
     noop_forced_all    = int(np.sum(ep_noop_forced)) if ep_noop_forced else 0
     noop_chosen_all    = int(np.sum(ep_noop_chosen)) if ep_noop_chosen else 0
     had_candidates_all = int(np.sum(ep_had_candidates)) if ep_had_candidates else 0
-
+ 
     noop_frac_forced_rate = (noop_forced_all / decisions_all) if decisions_all > 0 else 0.0
     noop_frac_chosen_rate = (noop_chosen_all / decisions_all) if decisions_all > 0 else 0.0
     chosen_noop_rate_when_available = (
         noop_chosen_all / had_candidates_all if had_candidates_all > 0 else 0.0
     )
-
+ 
     return {
         "reward_mean": float(r.mean()) if len(r) else 0.0,
         "reward_std": float(r.std()) if len(r) else 0.0,
@@ -780,27 +872,27 @@ def _stats_from_raw(raw: dict) -> dict:
         "obsolete": float(np.mean(obsolete)) if obsolete else 0.0,
         "noop_frac_mean": float(np.mean(noop_fractions)) if noop_fractions else 0.0,
         "ticks_mean": float(np.mean(ticks)) if ticks else 0.0,
-
+ 
         "invalid_action_total": invalid_all,
         "total_action_count": total_actions_all,
         "invalid_action_rate": float(invalid_rate),
         "conflict_drop_rate": float(conflict_rate),
         "capacity_reject_rate": float(caprej_rate),
         "mask_zero_mean": float(np.mean(ep_mask_zeros)) if ep_mask_zeros else 0.0,
-
+ 
         "r_comp_mean": float(np.mean(ep_r_comp)) if ep_r_comp else 0.0,
         "r_wait_mean": float(np.mean(ep_r_wait)) if ep_r_wait else 0.0,
         "r_deadline_mean": float(np.mean(ep_r_deadline)) if ep_r_deadline else 0.0,
         "r_obsolete_mean": float(np.mean(ep_r_obsolete)) if ep_r_obsolete else 0.0,
-
+ 
         "noop_frac_forced": float(noop_frac_forced_rate),
         "noop_frac_chosen": float(noop_frac_chosen_rate),
         "chosen_noop_rate_when_available": float(chosen_noop_rate_when_available),
         "decisions_total": decisions_all,
         "had_candidates_total": had_candidates_all,
     }
-
-
+ 
+ 
 def _merge_raw(raw_list: List[dict]) -> dict:
     """Concatenate every list-valued field across multiple run_eval() raw
     outputs (one per eval seed) — used to pool episodes from every eval
@@ -815,8 +907,8 @@ def _merge_raw(raw_list: List[dict]) -> dict:
         for raw in raw_list:
             merged[key].extend(raw[key])
     return merged
-
-
+ 
+ 
 def run_eval_across_seeds(model, agents, tasks, config, eval_seeds: List[int],
                            episodes_per_seed: int, deterministic: bool):
     """Runs run_eval() once per eval seed (genuinely different environment
@@ -835,14 +927,14 @@ def run_eval_across_seeds(model, agents, tasks, config, eval_seeds: List[int],
         env.close()
         raw["eval_seed"] = [es] * episodes_per_seed  # tag each episode with which eval seed produced it
         raw_per_seed.append(raw)
-
+ 
     merged = _merge_raw(raw_per_seed)
     merged["stats"] = _stats_from_raw(merged)
     merged["stats"]["eval_seeds_used"] = list(eval_seeds)
     merged["stats"]["episodes_per_eval_seed"] = episodes_per_seed
     return merged
-
-
+ 
+ 
 def run_eval(model, env, episodes, deterministic):
     rewards, lengths, ticks, completed, obsolete = [], [], [], [], []
     noop_fractions, action_hists = [], []
@@ -939,19 +1031,19 @@ def run_eval(model, env, episodes, deterministic):
         "obsolete": obsolete,
         "noop_fractions": noop_fractions,
         "action_hists": action_hists,
-
+ 
         "ep_invalid_action_count": ep_invalids,
         "ep_total_action_count": ep_totals,
         "ep_valid_action_count": ep_valids,
         "ep_conflict_dropped_count": ep_conflicts,
         "ep_capacity_rejected_count": ep_capacity_rej,
         "ep_mask_zero_count": ep_mask_zeros,
-
+ 
         "ep_r_comp": ep_r_comp,
         "ep_r_wait": ep_r_wait,
         "ep_r_deadline": ep_r_deadline,
         "ep_r_obsolete": ep_r_obsolete,
-
+ 
         "ep_noop_forced_count": ep_noop_forced,
         "ep_noop_chosen_count": ep_noop_chosen,
         "ep_had_candidates_count": ep_had_candidates,
@@ -981,7 +1073,7 @@ def evaluate_one_seed(seed: int, run_dir: Path, config: Dict, agents, tasks,
     eval_seeds are given, matching the old single-seed behavior."""
     if eval_seeds is None:
         eval_seeds = [seed]
-
+ 
     print(f"\n---- train seed {seed} | eval seeds {eval_seeds} ----")
     print(" Selected run:", run_dir)
  

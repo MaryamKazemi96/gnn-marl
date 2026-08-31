@@ -12,7 +12,7 @@
  
 # # Import data loading function from train_ppo
 # sys.path.insert(0, str(Path(__file__).resolve().parent))
-# from train_ppo import load_generated_data
+# from train_ppo import load_generated_data, get_eval_seeds
  
  
 # POLICIES = ["random", "greedy", "unique", "pickup_deadline", "pickup_deadline_distance", "predicted_reward", "predicted_reward_joint", "proposal_joint_competition"]
@@ -851,24 +851,26 @@
  
 #     for seed_dir in seed_dirs:
 #         config = load_run_config(seed_dir, args.config, args.conflict_resolution)
+#         eval_seeds = get_eval_seeds(config)
  
-#         seed = int(seed_dir.name.replace("seed_", ""))
+#         train_seed = int(seed_dir.name.replace("seed_", ""))
 #         eval_dir = seed_dir / "eval_results"
 #         eval_dir.mkdir(parents=True, exist_ok=True)
  
 #         print("=" * 80)
-#         print(f"Seed {seed} | Episodes per policy: {args.episodes}")
+#         print(f"Train seed {train_seed} | Eval seeds {eval_seeds} | "
+#               f"Episodes per eval seed: {args.episodes}")
 #         print("=" * 80 + "\n")
  
-#         per_seed: Dict[str, Dict[str, Any]] = {str(seed): {}}
+#         per_seed: Dict[str, Dict[str, Any]] = {str(train_seed): {}}
 #         per_policy_allseeds: Dict[str, List[Dict[str, Any]]] = {
 #             p: [] for p in POLICIES
 #         }
  
 #         for policy_name in POLICIES:
  
-#             print(f"  Evaluating {policy_name}...")
- 
+#             print(f"  Evaluating {policy_name} across {len(eval_seeds)} eval seed(s)...")
+
 #             # Baselines pick actions via pure heuristics — there is no
 #             # policy in this loop at all, so there are no logits to bid
 #             # with. 'hungarian_bids' is meaningless here; fall back to
@@ -882,77 +884,91 @@
 #                 env_conflict_resolution = "hungarian"
 #                 print("    (conflict_resolution='hungarian_bids' has no meaning for baselines — "
 #                       "no policy/logits exist here — using 'hungarian' distance-based assignment instead)")
- 
-#             try:
-#                 base_env = MultiAgentTaskEnv(
-#                     agents=agents,
-#                     tasks_batches=tasks_batches,
-#                     K_max=config["K_max"],
-#                     N_max=config["N_max"],
-#                     E_max=config["E_max"],
-#                     use_xy_pickup=config.get("use_xy_pickup", False),
-#                     normalize_features=config.get("normalize_features", True),
-#                     use_node_type=config.get("use_node_type", True),
-#                     use_ego_robot=config.get("use_ego_robot", True),
-#                     use_edge_rt=config.get("use_edge_rt", False),
-#                     edge_features=config.get("edge_features"),
-#                     two_hop=config.get("two_hop", False),
-#                     two_hop_directed=config.get("two_hop_directed", False),
-#                     vicinity_m=config.get("vicinity_m", 20.0),
-#                     max_steps=config.get("max_steps", 1000),
-#                     max_robot_capacity=config.get("max_robot_capacity", 2),
-#                     max_wait_delay_s=config.get("max_wait_delay_s", 600.0),
-#                     max_travel_delay_s=config.get("max_travel_delay_s", 3600.0),
-#                     decision_interval=config.get("decision_interval", 8),
-#                     movement_speed=config.get("movement_speed", 1.0),
-#                     capacity_method=config.get("capacity_method", "assigned"),
-#                     W_COMP=config.get("W_COMP", 2.0),
-#                     W_WAIT=config.get("W_WAIT", 1.0),
-#                     W_DEADLINE=config.get("W_DEADLINE", 10.0),
-#                     W_OBS=config.get("W_OBS", 1.0),
-#                     conflict_resolution=env_conflict_resolution,
-#                     candidates_sorting=config.get("candidates_sorting", "distance"),
-#                 )
-#             except Exception as e:
-#                 print(f"  Error creating environment: {e}")
-#                 continue
- 
-#             try:
-#                 res = evaluate_policy(
-#                     env=base_env,
-#                     config=config,
-#                     policy_name=policy_name,
-#                     n_episodes=args.episodes,
-#                     seed=seed,
-#                     debug=args.debug,
-#                     shuffle_robots=args.shuffle_robots,
-#                     unique_shuffle_k=args.unique_shuffle_k,
-#                 )
- 
-#                 per_seed[str(seed)][policy_name] = res
-#                 per_policy_allseeds[policy_name].append(res)
- 
-#                 # save individual policy result
-#                 (eval_dir / f"baseline_{policy_name}.json").write_text(
-#                     json.dumps(res, indent=2)
-#                 )
- 
-#                 print(
-#                     f"   {policy_name}: "
-#                     f"{res['stats']['reward_mean']:.2f} ± "
-#                     f"{res['stats']['reward_std']:.2f}\n"
-#                 )
- 
-#             except Exception as e:
-#                 print(f"   Error evaluating {policy_name}: {e}")
-#                 import traceback
-#                 traceback.print_exc()
- 
-#             finally:
+
+#             # One env per EVAL seed (not one shared env reused across all
+#             # of them) — matches eval_ppo.py's approach: genuinely
+#             # different environment randomization per eval seed, decoupled
+#             # from the train seed's own value entirely (baselines don't
+#             # even need a trained model, so there's no reason their
+#             # statistical power should be bottlenecked by however many
+#             # train seeds happen to exist).
+#             per_eval_seed_results: List[Dict[str, Any]] = []
+#             for es in eval_seeds:
 #                 try:
-#                     base_env.close()
-#                 except Exception:
-#                     pass
+#                     base_env = MultiAgentTaskEnv(
+#                         agents=agents,
+#                         tasks_batches=tasks_batches,
+#                         K_max=config["K_max"],
+#                         N_max=config["N_max"],
+#                         E_max=config["E_max"],
+#                         use_xy_pickup=config.get("use_xy_pickup", False),
+#                         normalize_features=config.get("normalize_features", True),
+#                         use_node_type=config.get("use_node_type", True),
+#                         use_ego_robot=config.get("use_ego_robot", True),
+#                         use_edge_rt=config.get("use_edge_rt", False),
+#                         edge_features=config.get("edge_features"),
+#                         two_hop=config.get("two_hop", False),
+#                         two_hop_directed=config.get("two_hop_directed", False),
+#                         vicinity_m=config.get("vicinity_m", 20.0),
+#                         max_steps=config.get("max_steps", 1000),
+#                         max_robot_capacity=config.get("max_robot_capacity", 2),
+#                         max_wait_delay_s=config.get("max_wait_delay_s", 600.0),
+#                         max_travel_delay_s=config.get("max_travel_delay_s", 3600.0),
+#                         decision_interval=config.get("decision_interval", 8),
+#                         movement_speed=config.get("movement_speed", 1.0),
+#                         capacity_method=config.get("capacity_method", "assigned"),
+#                         W_COMP=config.get("W_COMP", 2.0),
+#                         W_WAIT=config.get("W_WAIT", 1.0),
+#                         W_DEADLINE=config.get("W_DEADLINE", 10.0),
+#                         W_OBS=config.get("W_OBS", 1.0),
+#                         conflict_resolution=env_conflict_resolution,
+#                         candidates_sorting=config.get("candidates_sorting", "distance"),
+#                     )
+#                 except Exception as e:
+#                     print(f"  Error creating environment for eval_seed={es}: {e}")
+#                     continue
+
+#                 try:
+#                     res = evaluate_policy(
+#                         env=base_env,
+#                         config=config,
+#                         policy_name=policy_name,
+#                         n_episodes=args.episodes,
+#                         seed=es,
+#                         debug=args.debug,
+#                         shuffle_robots=args.shuffle_robots,
+#                         unique_shuffle_k=args.unique_shuffle_k,
+#                     )
+#                     per_eval_seed_results.append(res)
+#                 except Exception as e:
+#                     print(f"   Error evaluating {policy_name} (eval_seed={es}): {e}")
+#                     import traceback
+#                     traceback.print_exc()
+#                 finally:
+#                     try:
+#                         base_env.close()
+#                     except Exception:
+#                         pass
+
+#             if not per_eval_seed_results:
+#                 print(f"   ⚠️  No successful eval-seed runs for {policy_name}, skipping.")
+#                 continue
+
+#             res = _concat_results(per_eval_seed_results)  # pooled across ALL eval seeds
+#             per_seed[str(train_seed)][policy_name] = res
+#             per_policy_allseeds[policy_name].append(res)
+
+#             # save individual policy result
+#             (eval_dir / f"baseline_{policy_name}.json").write_text(
+#                 json.dumps(res, indent=2)
+#             )
+
+#             print(
+#                 f"   {policy_name}: "
+#                 f"{res['stats']['reward_mean']:.2f} ± "
+#                 f"{res['stats']['reward_std']:.2f}  "
+#                 f"(n={len(res['rewards'])} episodes pooled across {len(eval_seeds)} eval seeds)\n"
+#             )
  
 #         # ---------------------------------------------------------
 #         # Combined summary for this seed
@@ -961,9 +977,9 @@
 #             p: _concat_results(per_policy_allseeds[p])
 #             for p in POLICIES
 #         }
-#         combined_results["num_episodes_per_seed"] = int(args.episodes)
-#         combined_results["num_seeds"] = 1
-#         combined_results["seeds"] = [seed]
+#         combined_results["num_episodes_per_eval_seed"] = int(args.episodes)
+#         combined_results["eval_seeds"] = eval_seeds
+#         combined_results["train_seed"] = train_seed
  
 #         (eval_dir / "baseline_results_all.json").write_text(
 #             json.dumps(combined_results, indent=2)
@@ -973,7 +989,7 @@
 #         )
  
 #         print("\n" + "=" * 80)
-#         print(f"Summary (Seed {seed})")
+#         print(f"Summary (Train Seed {train_seed})")
 #         print("=" * 80 + "\n")
  
 #         print(f"{'Policy':<12} {'Reward Mean':<15} {'Reward Std':<15} {'Completed':<15}")
@@ -990,6 +1006,45 @@
         
 # if __name__ == "__main__":
 #     main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1865,7 +1920,7 @@ def main() -> None:
         for policy_name in POLICIES:
  
             print(f"  Evaluating {policy_name} across {len(eval_seeds)} eval seed(s)...")
-
+ 
             # Baselines pick actions via pure heuristics — there is no
             # policy in this loop at all, so there are no logits to bid
             # with. 'hungarian_bids' is meaningless here; fall back to
@@ -1879,7 +1934,7 @@ def main() -> None:
                 env_conflict_resolution = "hungarian"
                 print("    (conflict_resolution='hungarian_bids' has no meaning for baselines — "
                       "no policy/logits exist here — using 'hungarian' distance-based assignment instead)")
-
+ 
             # One env per EVAL seed (not one shared env reused across all
             # of them) — matches eval_ppo.py's approach: genuinely
             # different environment randomization per eval seed, decoupled
@@ -1918,11 +1973,13 @@ def main() -> None:
                         W_OBS=config.get("W_OBS", 1.0),
                         conflict_resolution=env_conflict_resolution,
                         candidates_sorting=config.get("candidates_sorting", "distance"),
+                        reward_type=config.get("reward_type", "legacy"),
+                        W_TRAVEL=config.get("W_TRAVEL", 1.25),
                     )
                 except Exception as e:
                     print(f"  Error creating environment for eval_seed={es}: {e}")
                     continue
-
+ 
                 try:
                     res = evaluate_policy(
                         env=base_env,
@@ -1944,20 +2001,20 @@ def main() -> None:
                         base_env.close()
                     except Exception:
                         pass
-
+ 
             if not per_eval_seed_results:
                 print(f"   ⚠️  No successful eval-seed runs for {policy_name}, skipping.")
                 continue
-
+ 
             res = _concat_results(per_eval_seed_results)  # pooled across ALL eval seeds
             per_seed[str(train_seed)][policy_name] = res
             per_policy_allseeds[policy_name].append(res)
-
+ 
             # save individual policy result
             (eval_dir / f"baseline_{policy_name}.json").write_text(
                 json.dumps(res, indent=2)
             )
-
+ 
             print(
                 f"   {policy_name}: "
                 f"{res['stats']['reward_mean']:.2f} ± "
