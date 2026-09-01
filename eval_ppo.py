@@ -759,6 +759,7 @@ def make_env(agents, tasks, config, seed):
             conflict_resolution=config.get("conflict_resolution", "greedy"),
             candidates_sorting=config.get("candidates_sorting", "distance"),
             reward_type=config.get("reward_type", "legacy"),
+            completion_mode=config.get("completion_mode", "dropoff"),
             W_TRAVEL=config.get("W_TRAVEL", 1.25),
         )
         env.reset(seed=seed)

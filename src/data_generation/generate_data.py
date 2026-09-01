@@ -176,8 +176,6 @@
 #         np.save(tasks_file, batch)
 #         print(f"Tasks for batch {i} (release_time={i * args.release_interval}) saved to {tasks_file}")
 
-
-
 import random
 import math
 import sys
@@ -383,7 +381,7 @@ if __name__ == "__main__":
         output_dir = Path(args.output_dir)
     else:
         output_dir = Path(__file__).resolve().parent.parent.parent / "data"
-    output_dir.mkdir(exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Save agents
     agents_file = output_dir / "agents.npy"

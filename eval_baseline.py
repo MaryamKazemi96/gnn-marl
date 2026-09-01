@@ -1974,6 +1974,7 @@ def main() -> None:
                         conflict_resolution=env_conflict_resolution,
                         candidates_sorting=config.get("candidates_sorting", "distance"),
                         reward_type=config.get("reward_type", "legacy"),
+                        completion_mode=config.get("completion_mode", "dropoff"),
                         W_TRAVEL=config.get("W_TRAVEL", 1.25),
                     )
                 except Exception as e:

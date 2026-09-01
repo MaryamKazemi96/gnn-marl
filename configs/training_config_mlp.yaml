@@ -13,6 +13,8 @@ W_COMP: 2.0
 W_WAIT: 1.5
 W_DEADLINE: 15.0 #10.0
 W_OBS: 5.0 #4.0
+completion_mode: valid_dropoff
+reward_type: legacy  # wait_travel
 
 # Environment parameters
 num_robots: 6
@@ -69,7 +71,7 @@ seeds:
   eval: [42, 123, 456]
 
 converge_on_plateau: true
-no_improvement_patience: 30    # consecutive non-improving evals before stopping
-no_improvement_min_evals: 20   # grace period before early stop can trigger at all
-total_timesteps: 400000       # now an UPPER BOUND, not a target — raise this well above 200k
+no_improvement_patience: 15    # consecutive non-improving evals before stopping
+no_improvement_min_evals: 10   # grace period before early stop can trigger at all
+total_timesteps: 200000       # now an UPPER BOUND, not a target — raise this well above 200k
 checkpoint_freq: 50000         # unchanged, but note eval_freq = checkpoint_freq // 5 = 10000

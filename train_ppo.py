@@ -2189,6 +2189,7 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
             conflict_resolution=config.get("conflict_resolution", "greedy"),
             candidates_sorting=config.get("candidates_sorting", "distance"),
             reward_type=config.get("reward_type", "legacy"),
+            completion_mode=config.get("completion_mode", "dropoff"),
             W_TRAVEL=config.get("W_TRAVEL", 1.25),
         )
  
@@ -2221,7 +2222,8 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
         noop_init=float(config.get("noop_init", -1.0)),
         freeze_noop_logit=bool(config.get("freeze_noop_logit", False)),
         noop_mode=config.get("noop_mode", "scalar"),
-        edge_dim=0,
+        edge_dim=base_env.edge_feat_dim,
+        eta_index=(base_env.edge_features.index("eta") if "eta" in base_env.edge_features else -1),
         use_competitor_fusion=bool(two_hop and config.get("two_hop_arch", "comp_corr") == "comp_corr"),
         use_two_hop_actor=bool(two_hop and config.get("two_hop_arch", "") == "plain"),
         use_two_hop_critic=bool(two_hop and config.get("two_hop_critic", False)),
@@ -2375,6 +2377,7 @@ def run_single_seed(seed: int, config: Dict, continue_training: bool, run_id: st
                 conflict_resolution=config.get("conflict_resolution", "greedy"),
                 candidates_sorting=config.get("candidates_sorting", "distance"),
                 reward_type=config.get("reward_type", "legacy"),
+                completion_mode=config.get("completion_mode", "dropoff"),
                 W_TRAVEL=config.get("W_TRAVEL", 1.25),
             )
             return Monitor(eval_base_env)

@@ -1,5 +1,5 @@
 
-max_robot_capacity: 3        # was 3 — matches reference's cap2 configs
+max_robot_capacity: 3        # 2
 max_wait_delay_s:   300.0    # already matched
 max_travel_delay_s: 240.0    # was 100.0 — matches reference
 movement_spee: 1.0
@@ -12,10 +12,12 @@ capacity_method: "assigned"
 # NOT yet ported, since it needs code changes to _compute_rewards, not
 # just these weights. Left at your existing values for now; flagging this
 # as the next fidelity gap once you're ready to tackle it.
-W_COMP: 2.0
+W_COMP: 2.0 #3
 W_WAIT: 1.5
 W_DEADLINE: 15.0 #10.0
-W_OBS: 5.0 #4.0
+W_OBS: 5.0 #0
+completion_mode: valid_dropoff
+reward_type: legacy # wait_travel
 
 # Environment parameters
 num_robots: 6
@@ -74,7 +76,7 @@ seeds:
   eval: [42, 123, 456]
 
 converge_on_plateau: true
-no_improvement_patience: 30    # consecutive non-improving evals before stopping
-no_improvement_min_evals: 20   # grace period before early stop can trigger at all
-total_timesteps: 400000       # now an UPPER BOUND, not a target — raise this well above 200k
+no_improvement_patience: 15    # consecutive non-improving evals before stopping
+no_improvement_min_evals: 10   # grace period before early stop can trigger at all
+total_timesteps: 200000       # now an UPPER BOUND, not a target — raise this well above 200k
 checkpoint_freq: 50000         # unchanged, but note eval_freq = checkpoint_freq // 5 = 10000

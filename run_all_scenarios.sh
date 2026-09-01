@@ -25,7 +25,7 @@ EPISODES=50
 SEEDS=(100) 
 INSTANCE=1             # which data/scenario_*/instance_N to use
 
-SCENARIOS=(baseline corridor wave)
+SCENARIOS=(corridor wave baseline)
 BACKBONES=(
     "gnn:configs/training_config.yaml"
     "mlp:configs/training_config_mlp.yaml"
@@ -87,12 +87,12 @@ with open('${tmp_config}', 'w') as f:
         python3 eval_baseline.py --config "$tmp_config" --episodes $EPISODES --all-seeds --run-id "$run_id"
 
         echo "[$scenario/$name] Plotting per-seed training diagnostics..."
-        for s in "${SEEDS[@]}"; do
-            python3 plot_training.py --seed "$s" --run-id "$run_id"
-        done
+        # for s in "${SEEDS[@]}"; do
+            # python3 plot_training.py --seed "$s" --run-id "$run_id"
+        # done
 
         echo "[$scenario/$name] Plotting cross-seed training reward (mean +/- std band)..."
-        python3 plot_training.py --run-id "$run_id" --multi-seed
+        # python3 plot_training.py --run-id "$run_id" --multi-seed
 
         echo "[$scenario/$name] Evaluating PPO..."
         # python3 eval_ppo.py --all-seeds --episodes $EPISODES --run-id "$run_id"

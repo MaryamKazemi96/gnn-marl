@@ -15,8 +15,8 @@ python3 eval_ppo.py --all-seeds --episodes 50
 
 echo "Starting Plot training..."
 python3 plot_training.py --seed 100
-python3 plot_training.py --seed 200
-python3 plot_training.py --seed 300
+# python3 plot_training.py --seed 200
+# python3 plot_training.py --seed 300
 
 echo "Plotting evaluation results..."
 python3 plot_eval.py \
