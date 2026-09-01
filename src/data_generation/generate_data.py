@@ -184,10 +184,10 @@ import yaml
 from PIL import Image
 import numpy as np
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-
+ 
 from utils.utils import astar, discritized_path  # Ensure astar is implemented in utils.py
 from environment.environment import Planner
-
+ 
 class DataGenerator:
     def __init__(self, x_min, x_max, y_min, y_max, max_waiting_time,
                   max_travel_delay_percentage, planning_resolution,
@@ -204,7 +204,7 @@ class DataGenerator:
         self.max_travel_delay_percentage = max_travel_delay_percentage
         self.planner = planner  
         
-
+ 
     def generate_agents(self, num_agents):
         agents = []
         for i in range(num_agents):
@@ -217,7 +217,7 @@ class DataGenerator:
                     agents.append([unique_id, w, h])
                     break
         return np.array(agents)
-
+ 
     def generate_tasks(self, n_batches, n_points, release_time_interval=15):
         """
         Generate tasks for multiple batches with release times.
@@ -252,24 +252,24 @@ class DataGenerator:
                 # yaw_origin = random.random() * 2 * math.pi - math.pi
                 # yaw_destination = random.random() * 2 * math.pi - math.pi
                 t_release = batch_release_time  # Use batch-specific release time
-
+ 
                 # Calculate estimated travel time using Planner (A*)
                 start = (h_origin, w_origin)
                 goal = (h_destination, w_destination)
                 found, path = self.planner.get_plan(start, goal)
                 if not found:
                     continue  # Skip if no path found
-
+ 
                 # Use path length as estimated travel time
                 estimated_travel_time = len(path) if found else float('inf')
-
+ 
                 # Calculate deadlines
                 pickup_deadline = (t_release * i) + self.max_waiting_time
                 drop_off_deadline = pickup_deadline + (estimated_travel_time * (1 + self.max_travel_delay_percentage))
-
+ 
                 # Generate a unique ID (task)
                 unique_id = int(f"1{i:02d}{task_num:02d}")
-
+ 
                 tasks.append([
                     unique_id,
                     w_origin, h_origin,
@@ -280,9 +280,9 @@ class DataGenerator:
                     drop_off_deadline
                 ])
                 task_num += 1
-
+ 
             all_batches.append(tasks)
-
+ 
         return all_batches
     
 if __name__ == "__main__":
@@ -315,8 +315,22 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=None,
                         help="Seed Python's random module for reproducible generation. "
                              "Default (None): unseeded, a fresh unrepeatable draw each run.")
+    parser.add_argument("--max-waiting-time", type=float, default=200,
+                        help="Pickup deadline, in the same time units as --release-interval: "
+                             "pickup_deadline = release_time + max_waiting_time (default: 200). "
+                             "Was previously hardcoded — tightening this is one of the two real "
+                             "levers for making generated tasks actually failable (see "
+                             "--max-travel-delay-pct), since with the old generous default even "
+                             "a random policy completed nearly every task.")
+    parser.add_argument("--max-travel-delay-pct", type=float, default=2,
+                        help="Slack multiplier on estimated travel time for the dropoff "
+                             "deadline: dropoff_deadline = pickup_deadline + est_travel_time * "
+                             "(1 + max_travel_delay_pct) (default: 2, i.e. 3x the estimated "
+                             "travel time is allowed). Was previously hardcoded. Lower this "
+                             "(e.g. 0.3-0.5) for a scenario where route inefficiency genuinely "
+                             "risks missing the dropoff deadline, not just the pickup one.")
     args = parser.parse_args()
-
+ 
     if args.seed is not None:
         random.seed(args.seed)
         print(f"  - seed: {args.seed} (reproducible)")
@@ -327,23 +341,23 @@ if __name__ == "__main__":
     config_path = Path(__file__).resolve().parent.parent.parent / "env" / "ATC_wed.yaml"
     with open(config_path, 'r') as file:
         params = yaml.safe_load(file)
-
+ 
     # Extract grid bounds and other parameters from the YAML file
     x_min, x_max = params['x_min'], params['x_max']
     y_min, y_max = params['y_min'], params['y_max']
     map_resolution = params['map_resolution']
     Planning_resolution = params['Planning_resolution']
-    max_waiting_time = 200
-    max_travel_delay_percentage = 2
-
+    max_waiting_time = args.max_waiting_time
+    max_travel_delay_percentage = args.max_travel_delay_pct
+ 
     # Initialize planner (expects Planner to load map from env/ATC_wed.yaml)
     planner = Planner()
-
+ 
     # Initialize the data generator
     generator = DataGenerator(x_min, x_max, y_min, y_max, max_waiting_time, 
                               max_travel_delay_percentage, Planning_resolution, 
                               planner, origin_x=-60, origin_y=20)
-
+ 
     if args.region == "corridor":
         # Narrow the horizontal sampling range to a centered strip, leaving
         # h_min/h_max (vertical) untouched — forces every agent/task pickup
@@ -364,7 +378,7 @@ if __name__ == "__main__":
         generator.w_min, generator.w_max = new_w_min, new_w_max
     else:
         print(f"  - region: full")
-
+ 
     # Generate tasks with batch release times
     # Batch 0: release_time = 0, Batch 1: release_time = 30, Batch 2: release_time = 60, etc.
     print(f"Generating data:")
@@ -375,19 +389,19 @@ if __name__ == "__main__":
     
     agents = generator.generate_agents(args.n_robots)
     tasks = generator.generate_tasks(args.n_batches, args.n_tasks, args.release_interval)
-
+ 
     # Determine output directory
     if args.output_dir:
         output_dir = Path(args.output_dir)
     else:
         output_dir = Path(__file__).resolve().parent.parent.parent / "data"
     output_dir.mkdir(parents=True, exist_ok=True)
-
+ 
     # Save agents
     agents_file = output_dir / "agents.npy"
     np.save(agents_file, agents)
     print(f"Agents saved to {agents_file}")
-
+ 
     # Save tasks batches
     for i, batch in enumerate(tasks):
         tasks_file = output_dir / f"tasks_batch_{i}.npy"

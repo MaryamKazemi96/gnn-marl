@@ -6,31 +6,23 @@
 # your colleague's slides. Baselines only — no PPO training needed, since
 # every baseline policy here is a fixed heuristic, not a trained model.
 #
-# For each resolver, evaluates ALL baseline policies currently implemented
-# (random, greedy, unique, pickup_deadline, pickup_deadline_distance,
-# predicted_reward, predicted_reward_joint — eval_baseline.py's POLICIES
-# list, no need to enumerate them here) across every seed in $SEEDS, then
-# plots them all together with plot_policy_resolver_grid.py.
+# UPDATED: eval_baseline.py's actual eval-seed diversity now comes
+# entirely from configs/training_config.yaml's seeds.eval list, applied
+# ONCE per pre-created seed_* directory it finds under --all-seeds. Since
+# baselines never touch a trained model, "train seed" identity is
+# meaningless for them — pre-creating multiple seed_* directories (as the
+# old version of this script did) just re-runs the SAME pooled-over-
+# seeds.eval computation redundantly, once per directory, for zero
+# statistical benefit. Now pre-creates exactly ONE placeholder directory.
+# If you want MORE eval-seed diversity, add values to seeds.eval in the
+# config instead — that's the actual lever now.
 
 set -e
 
 CONFIG="configs/training_config.yaml"
 EPISODES=50
 
-# Must match (or be a subset of) configs/training_config.yaml's seeds: list
-# — eval_baseline.py's env construction reads other settings from $CONFIG,
-# but the actual seed values used here are these, independent of training.
-SEEDS=(42 123)
-# SEEDS+=(456)
 
-# Every resolver baselines can meaningfully run under.
-# 'greedy' is deliberately excluded even though your environment supports
-# it — it's an alias for the exact same code path as 'closest_than_capacity'
-# (see environment.py's _resolve_conflicts()), so running both would just
-# duplicate compute for identical results.
-# 'hungarian_bids' is excluded too — it requires a trained policy's logits
-# as bids, which baselines don't have (see eval_baseline.py's automatic
-# fallback to 'hungarian' if you ever pass it here anyway).
 RESOLVERS=(capacity closest_than_capacity random hungarian predicted_reward predicted_reward_joint)
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -38,7 +30,7 @@ RUN_ROOT="runs/run_${TIMESTAMP}_policy_resolver_cmp"
 
 echo "Sweep folder: ${RUN_ROOT}/"
 echo "Resolvers: ${RESOLVERS[*]}"
-echo "Seeds: ${SEEDS[*]}"
+echo "Eval seeds used: whatever configs/training_config.yaml's seeds.eval currently lists"
 echo
 
 RESOLVER_PLOT_ARGS=()
@@ -50,15 +42,9 @@ for r in "${RESOLVERS[@]}"; do
     echo " Resolver: $r"
     echo "================================================================"
 
-    # eval_baseline.py's --all-seeds discovers seed_* directories that
-    # already exist under runs/run_{run_id}/ (normally created by
-    # train_ppo.py) — pre-create them here since baselines don't need a
-    # trained model at all.
-    for s in "${SEEDS[@]}"; do
-        mkdir -p "runs/run_${run_id}/seed_${s}"
-    done
+    mkdir -p "runs/run_${run_id}/seed_1"
 
-    echo "[$r] Evaluating baselines (${SEEDS[*]})..."
+    echo "[$r] Evaluating baselines..."
     python3 eval_baseline.py --config "$CONFIG" --episodes $EPISODES --all-seeds \
         --conflict-resolution "$r" --run-id "$run_id"
 

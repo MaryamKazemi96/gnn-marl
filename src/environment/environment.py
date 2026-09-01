@@ -2332,9 +2332,6 @@ class MultiAgentTaskEnv(gym.Env):
         # via set_pending_logits() — only used by conflict_resolution=
         # 'hungarian_bids'. None until the first policy forward() call.
         self._pending_logits = None
-    # =========================================================================
-    # RESET
-    # =========================================================================
  
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -2415,10 +2412,7 @@ class MultiAgentTaskEnv(gym.Env):
     def _reset_old_mode(self):
         pass
  
-    # =========================================================================
-    # TASK RELEASE
-    # =========================================================================
- 
+  
     def _release_pending_tasks(self):
         for batch in self.tasks_batches:
             for task_data in batch:
@@ -2443,9 +2437,6 @@ class MultiAgentTaskEnv(gym.Env):
                         "assigned_robot": None,
                     }
  
-    # =========================================================================
-    # STEP
-    # =========================================================================
     def _debug_robot_state(self):
         print("\n================ ROBOT STATE ================")
         print(f"time={self.current_time:.1f} step={self.current_step}")
@@ -2577,23 +2568,9 @@ class MultiAgentTaskEnv(gym.Env):
             "ep_r_deadline": self.debug_ep_r_deadline,
             "ep_r_obsolete": self.debug_ep_r_obsolete,
         }
-        # print(f'completed_count:=',self.episode_completed_count, 'obsolete_count:=',self.episode_obsolete_count, 'pickup_count:=',
-        #       self.episode_pickup_count, 'dropoff_count:=',self.episode_dropoff_count)
         return obs, reward, terminated, truncated, info
    
-    # =========================================================================
-    # ACTION PROCESSING
-    # =========================================================================
-    # =========================================================================
-    # CONFLICT RESOLUTION
-    # =========================================================================
-    # All three resolvers take the same input — a list of (dist, robot_id,
-    # task_id) requests, already filtered so every task_id refers to a task
-    # that's real/unassigned/not obsolete/not completed at proposal time —
-    # and return a list of (robot_id, task_id) winners. Capacity checking
-    # happens in the caller (_process_actions) identically for all three, so
-    # differences in outcomes are purely about *who wins a contested task*,
-    # not about capacity semantics.
+
  
     def _resolve_conflicts(self, requests):
         if not requests:
@@ -2830,13 +2807,6 @@ class MultiAgentTaskEnv(gym.Env):
         return winners
  
     def _resolve_conflicts_hungarian_with_bid_fn(self, requests, bid_fn):
-        """Shared centralized-assignment machinery for any resolver that
-        scores (robot, task) pairs with a pluggable bid_fn(robot_id,
-        task_id) -> float, instead of distance or policy logits. Used by
-        both _resolve_conflicts_predicted_reward and
-        _resolve_conflicts_predicted_reward_joint. Same eligibility rule
-        as the other hungarian variants: a robot can only be matched to a
-        task that was actually in its own candidate list this step."""
         robot_ids = sorted({r for _, r, _ in requests})
         task_ids  = sorted({t for _, _, t in requests})
         R, T = len(robot_ids), len(task_ids)
@@ -2879,12 +2849,7 @@ class MultiAgentTaskEnv(gym.Env):
         return winners
  
     def _resolve_conflicts_predicted_reward(self, requests):
-        """Centralized assignment using predict_candidate_score() (single-
-        candidate simulated pickup/dropoff scoring) as bid values —
-        matches the reference repo's 'predicted_reward' resolver: the
-        resolver reuses the exact same scoring function as the
-        predicted_reward baseline/proposer, just as the auction's bids
-        instead of a per-robot ranking."""
+   
         return self._resolve_conflicts_hungarian_with_bid_fn(
             requests, lambda rid, tid: self.predict_candidate_score(rid, tid)
         )
@@ -2899,10 +2864,7 @@ class MultiAgentTaskEnv(gym.Env):
         )
  
     def _process_actions(self, actions) -> Dict:
-        """
-        Uses _last_cand_task_ids from observation-time snapshot to prevent
-        index mismatch between policy output and candidate list.
-        """
+    
         robot_ids = sorted(self.robots.keys())
         requests = []
  
@@ -3193,14 +3155,7 @@ class MultiAgentTaskEnv(gym.Env):
                 invalid_action_count += 1
                 continue
  
-            # capacity_method="assigned": count onboard + queued-not-yet-picked
-            #   (conservative — reserves a seat for every task promised, even
-            #   ones not yet physically onboard)
-            # capacity_method="pickup": count onboard only (len(onboard_tasks))
-            #   (permissive — allows queuing more pickups than max_capacity as
-            #   long as physical onboard load never exceeds it; relies on
-            #   _assign_next_stop's room_to_pickup check to enforce the real
-            #   physical limit at pickup time)
+   
             if self.capacity_method == "assigned":
                 total_committed = (
                     len(robot["onboard_tasks"])
@@ -3322,18 +3277,7 @@ class MultiAgentTaskEnv(gym.Env):
         candidates.sort()
         top_k = candidates[: self.K_max]
  
-        # candidates_sorting='randomized' (matches reference config) keeps
-        # the SAME selection (still the K_max closest — this only changes
-        # which SLOT each one lands in, not which tasks are visible at
-        # all), but shuffles slot order so the GNN can't learn a lazy
-        # "prefer low slot index" shortcut instead of actually reasoning
-        # about each candidate's own features. Uses self.np_random (seeded
-        # via reset(seed=...)) for reproducibility. NOTE: any baseline that
-        # assumes slot 0 == nearest (e.g. distance-based tie-breaks) needs
-        # to look up actual distance explicitly instead when this is on —
-        # see eval_baseline.py's pickup_deadline_distance_action, which
-        # already does this correctly via task lookup rather than slot
-        # position.
+      
         if self.candidates_sorting == "randomized" and len(top_k) > 1:
             order = self.np_random.permutation(len(top_k))
             top_k = [top_k[i] for i in order]
@@ -3373,9 +3317,6 @@ class MultiAgentTaskEnv(gym.Env):
         candidates.sort()
         return [tid for _, tid in candidates[: self.K_max]]
  
-    # =========================================================================
-    # TASK LIFECYCLE — deadlines
-    # =========================================================================
  
     def _update_task_deadlines(self):
         """
@@ -3412,9 +3353,6 @@ class MultiAgentTaskEnv(gym.Env):
                 # Picked up tasks are kept alive; lateness handled at dropoff reward.
                 pass
  
-    # =========================================================================
-    # ROBOT MOVEMENT — A* path following
-    # =========================================================================
  
     def _execute_robot_movements_and_tasks(self):
         for robot_id, robot in self.robots.items():
@@ -3548,10 +3486,7 @@ class MultiAgentTaskEnv(gym.Env):
             robot["target_location"]      = None
             robot["path"]                 = []
  
-    # =========================================================================
-    # OBSERVATION
-    # =========================================================================
- 
+   
     def _build_observation(self) -> Dict:
         robot_ids = sorted(self.robots.keys())
         if len(robot_ids) < self.num_robots:
@@ -3586,27 +3521,7 @@ class MultiAgentTaskEnv(gym.Env):
         self._last_cand_task_ids = cand_task_ids
         return obs_dict
  
-    # =========================================================================
-    # ROUTE-INSERTION PREDICTION (predicted_reward / predicted_reward_joint)
-    # =========================================================================
-    #
-    # These simulate "what would happen if we inserted this candidate task
-    # into this robot's route" WITHOUT mutating any real robot/task state —
-    # used by the predicted_reward baseline/resolver (single-candidate
-    # score) and predicted_reward_joint (marginal score: how much does
-    # adding this candidate change the score of the WHOLE route, not just
-    # the candidate itself).
-    #
-    # The simulated walk deliberately mirrors _assign_next_stop()'s
-    # nearest-next-stop rule exactly (greedy route construction), so the
-    # prediction is consistent with what the robot would actually do if
-    # this candidate were assigned. One documented approximation: the walk
-    # uses straight-line distance / movement_speed for travel time, while
-    # real execution follows an A* path (_move_robot_toward_target) that
-    # can be longer if obstacles are in the way — so predictions are an
-    # estimate, not an exact replay, the same caveat the reference
-    # implementation's own travel-time estimator carries.
- 
+    
     def _simulate_route_with_candidate(self, robot_id, candidate_task_id):
         """Greedy nearest-next-stop walk over (robot's committed stops +
         candidate's pickup/dropoff), starting from the robot's current
@@ -3770,13 +3685,7 @@ class MultiAgentTaskEnv(gym.Env):
         committed_ids = list(robot["assigned_tasks"]) + list(robot["onboard_tasks"])
  
         def _pickup_time_for(tid, walked_pickup_time):
-            # Already-onboard tasks were picked up in the PAST — the walk
-            # only tracks pickup_time for stops it actually visits, and an
-            # already-onboard task has no pickup stop left to visit, so it
-            # would otherwise always come back as None (-> -inf score).
-            # Use the real recorded pickup time instead; only tasks whose
-            # pickup hasn't happened yet (queued or the candidate) get
-            # their pickup time from the simulated walk.
+           
             if tid in already_onboard:
                 return self.tasks[tid].get("pickup_time", self.current_time)
             return walked_pickup_time
@@ -3817,10 +3726,8 @@ class MultiAgentTaskEnv(gym.Env):
  
         return r_after - r_before
  
-    # =========================================================================
     # REWARD
-    # =========================================================================
- 
+   
     def _compute_rewards(self, action_info) -> float:
         reward_type = getattr(self, "reward_type", "legacy")
         if reward_type == "wait_travel":
@@ -3842,7 +3749,6 @@ class MultiAgentTaskEnv(gym.Env):
         r_deadline = 0.0
         r_obsolete = 0.0
  
-        # 1) pickup wait penalty
         for r in self.robots.values():
             task_id = r.get("just_picked_up_task")
             if not task_id:
@@ -3858,7 +3764,6 @@ class MultiAgentTaskEnv(gym.Env):
             r_wait += delta
             r["just_picked_up_task"] = None
  
-        # 2) completion + lateness penalties
         for task in self.tasks.values():
             if not task.get("is_completed"):
                 continue
@@ -3884,7 +3789,6 @@ class MultiAgentTaskEnv(gym.Env):
                 reward += delta
                 r_deadline += delta
  
-        # 3) obsolete penalties (only not-picked tasks become obsolete by design)
         for task in self.tasks.values():
             if not task.get("is_obsolete"):
                 continue
@@ -3914,49 +3818,7 @@ class MultiAgentTaskEnv(gym.Env):
         return float(reward)
  
     def _compute_rewards_wait_travel(self, action_info) -> float:
-        """Matches the reference repo's reward_type='wait_travel' +
-        completion_mode, ported from her _compute_rewards_per_robot_from_events
-        (fleet-summed here instead of per-robot — see caveat below).
- 
-        Two axes, independently configurable, matching her real structure
-        (NOT a single combined switch like our first port assumed):
- 
-        completion_mode controls WHEN W_COMP fires:
-          - "pickup": on every pickup event, unconditionally.
-          - "dropoff" (default): on every dropoff/completion event,
-            unconditionally — same behavior as _compute_rewards_legacy's
-            completion reward.
-          - "valid_dropoff": only on GENUINELY ON-TIME dropoffs (both
-            pickup and dropoff within deadline) — zero credit otherwise.
- 
-        The excess-ride-time penalty (W_TRAVEL) fires on every dropoff
-        regardless of completion_mode, exactly matching her code (that
-        block is gated only by reward_type=='wait_travel', not by
-        completion_mode at all).
- 
-        Obsolete-task handling: NOT a separate fixed penalty (there is no
-        W_OBS term in this mode at all, unlike legacy). Instead, folded
-        into the WAIT penalty using her exact formula — a penalty that
-        GROWS with how overdue the task now is, with a FLOOR of 0.05 (not
-        just a cap), so even a task that just barely went obsolete still
-        incurs some penalty:
-            late = max(1.0, current_time - pickup_deadline)
-            penalty = W_WAIT * -max(0.05, min(late, WAIT_CAP) / WAIT_CAP)
-        Tracked in its own r_obsolete debug accumulator (not added into
-        r_wait's accumulator) purely so the two contributions stay
-        separately visible in debug/logging output without double-
-        counting if anyone sums the debug fields — both still contribute
-        to the single scalar `reward` returned below exactly once.
- 
-        CAVEAT — her reference implementation computes this PER ROBOT
-        (returning Dict[str, float], one reward per robot based only on
-        tasks that specific robot handled). This port keeps our existing
-        FLEET-WIDE scalar aggregation (sum across all robots into one
-        number) — porting to genuine per-robot credit assignment is a
-        separate, larger architectural change (touches how PPO consumes
-        reward across the whole training loop), not something folded in
-        here.
-        """
+        
         W_COMP = self.W_COMP
         W_WAIT = self.W_WAIT
         W_TRAVEL = getattr(self, "W_TRAVEL", 1.25)

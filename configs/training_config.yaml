@@ -1,24 +1,29 @@
 
+backbone: sage                # sage = GNN (message-passing) | dummy = non-graph MLP ablation
+data_dir: data                # override per-run with --data-dir, or edit directly for a one-off
+ 
 max_robot_capacity: 3        # 2
 max_wait_delay_s:   300.0    # already matched
 max_travel_delay_s: 240.0    # was 100.0 — matches reference
 movement_spee: 1.0
 capacity_method: "assigned"
-
+ 
 # Reward
-# NOTE: reference uses a structurally different reward formula
-# (reward_type: wait_travel, w_deadline: 0, dedicated w_travel term,
-# completion_mode: valid_dropoff gating completion on on-time dropoff) —
-# NOT yet ported, since it needs code changes to _compute_rewards, not
-# just these weights. Left at your existing values for now; flagging this
-# as the next fidelity gap once you're ready to tackle it.
+# reward_type: legacy (default) = unconditional completion + continuous
+# deadline-lateness penalty. reward_type: wait_travel = gated on-time-only
+# completion + dedicated excess-ride-time penalty (W_TRAVEL), matching the
+# reference implementation — see _compute_rewards_wait_travel in
+# environment.py. completion_mode below is an orthogonal switch (pickup /
+# dropoff / valid_dropoff) controlling WHEN completion reward fires,
+# independent of which reward_type is active.
 W_COMP: 2.0 #3
 W_WAIT: 1.5
-W_DEADLINE: 15.0 #10.0
-W_OBS: 5.0 #0
+W_DEADLINE: 15.0 #10.0        # unused when reward_type: wait_travel (no separate deadline term in that mode)
+W_OBS: 5.0 #0                 # unused when reward_type: wait_travel (obsolete penalty folds into wait instead)
+W_TRAVEL: 1.25                # only used when reward_type: wait_travel — matches reference's w_travel weight
 completion_mode: valid_dropoff
 reward_type: legacy # wait_travel
-
+ 
 # Environment parameters
 num_robots: 6
 num_tasks: 40
@@ -27,56 +32,51 @@ batch_time: 180
 decision_interval: 8         
 conflict_resolution: greedy   
 candidates_sorting: randomized 
-
+ 
 # Graph parameters
 K_max: 3
 N_max: 16
 E_max: 64
 two_hop: False               
-
+ 
 use_xy_pickup: False
 normalize_features: True
 use_node_type: True
 use_ego_robot: True
 use_edge_rt: True
 two_hop_directed: False
-
-use_node_type: true
-use_ego_robot: true
-use_edge_rt: true
-
+ 
 robot_commitment: route_slots  
 route_slots_k: 2
-
+ 
 # PPO parameters
-ppo_steps: 256        # was 1024 — matches reference's n_steps
+ppo_steps: 256        
 batch_size: 64
 learning_rate: 0.0003
-ent_coef: 0.003        # was 0.008 — matches reference
-# total_timesteps: 200000  
-max_steps: 3000        # was 2500 — matches reference
+ent_coef: 0.003        
+max_steps: 3000        
 gamma: 0.99
 clip_range: 0.2
-vf_coef: 0.35           # was 0.5 — matches reference
+vf_coef: 0.35           
 gae_lambda: 0.95
 n_epochs: 5
 max_grad_norm: 0.5
 target_kl: 0.03 
-
+ 
 # Policy Parameter
 hidden: 128
-logit_temperature: 1.0   # already matched
+logit_temperature: 1.0  
 noop_init: -1.0
 freeze_noop_logit: false
 noop_mode: state_dependent  
-
+ 
 #experiments
 seeds:
   train: [100]
   eval: [42, 123, 456]
-
+ 
 converge_on_plateau: true
-no_improvement_patience: 15    # consecutive non-improving evals before stopping
-no_improvement_min_evals: 10   # grace period before early stop can trigger at all
-total_timesteps: 200000       # now an UPPER BOUND, not a target — raise this well above 200k
-checkpoint_freq: 50000         # unchanged, but note eval_freq = checkpoint_freq // 5 = 10000
+no_improvement_patience: 15    
+no_improvement_min_evals: 10   
+total_timesteps: 2000       
+checkpoint_freq: 50000        
