@@ -446,8 +446,17 @@ class BlendedConvergenceCallback(BaseCallback):
         self._last_eval_step = self.num_timesteps
         self.n_evals += 1
 
+        _hungarian_bids_active = getattr(self.model.policy, "_bid_env", None) is not None
+        if _hungarian_bids_active:
+            _training_bid_env = self.model.policy._bid_env
+            self.model.policy._bid_env = self.eval_env
+
         det_mean = self._run_eval(deterministic=True)
         sto_mean = self._run_eval(deterministic=False)
+
+        if _hungarian_bids_active:
+            self.model.policy._bid_env = _training_bid_env
+
         blended = self.blend_weight * det_mean + (1.0 - self.blend_weight) * sto_mean
 
         msg = (f"[ConvergenceEval #{self.n_evals}] ts={self.num_timesteps} "
