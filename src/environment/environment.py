@@ -1,4 +1,3 @@
-
 # import gymnasium as gym
 # import numpy as np
 # from typing import Dict, Any, Tuple, Optional, List
@@ -125,6 +124,7 @@
 #         candidates_sorting: str = "distance",
 #         reward_type: str = "legacy",
 #         W_TRAVEL: float = 1.25,
+#         completion_mode: str = "dropoff",
 #     ):
 #         super().__init__()
  
@@ -279,23 +279,24 @@
 #                             "capacity", "closest_than_capacity")
 #         if self.conflict_resolution not in _valid_resolvers:
 #             raise ValueError(f"conflict_resolution must be one of {_valid_resolvers}")
-
+ 
 #         self.candidates_sorting = candidates_sorting.lower()
 #         if self.candidates_sorting not in ("distance", "randomized"):
 #             raise ValueError("candidates_sorting must be 'distance' or 'randomized'")
-
+ 
 #         self.reward_type = reward_type.lower()
 #         if self.reward_type not in ("legacy", "wait_travel"):
 #             raise ValueError("reward_type must be 'legacy' or 'wait_travel'")
 #         self.W_TRAVEL = float(W_TRAVEL)
  
+#         self.completion_mode = completion_mode.lower()
+#         if self.completion_mode not in ("pickup", "dropoff", "valid_dropoff"):
+#             raise ValueError("completion_mode must be 'pickup', 'dropoff', or 'valid_dropoff'")
+ 
 #         # Populated externally, once per macro-step, by RTGNNPolicy.forward()
 #         # via set_pending_logits() — only used by conflict_resolution=
 #         # 'hungarian_bids'. None until the first policy forward() call.
 #         self._pending_logits = None
-#     # =========================================================================
-#     # RESET
-#     # =========================================================================
  
 #     def reset(self, seed=None, options=None):
 #         super().reset(seed=seed)
@@ -376,10 +377,7 @@
 #     def _reset_old_mode(self):
 #         pass
  
-#     # =========================================================================
-#     # TASK RELEASE
-#     # =========================================================================
- 
+  
 #     def _release_pending_tasks(self):
 #         for batch in self.tasks_batches:
 #             for task_data in batch:
@@ -404,9 +402,6 @@
 #                         "assigned_robot": None,
 #                     }
  
-#     # =========================================================================
-#     # STEP
-#     # =========================================================================
 #     def _debug_robot_state(self):
 #         print("\n================ ROBOT STATE ================")
 #         print(f"time={self.current_time:.1f} step={self.current_step}")
@@ -538,23 +533,9 @@
 #             "ep_r_deadline": self.debug_ep_r_deadline,
 #             "ep_r_obsolete": self.debug_ep_r_obsolete,
 #         }
-#         # print(f'completed_count:=',self.episode_completed_count, 'obsolete_count:=',self.episode_obsolete_count, 'pickup_count:=',
-#         #       self.episode_pickup_count, 'dropoff_count:=',self.episode_dropoff_count)
 #         return obs, reward, terminated, truncated, info
    
-#     # =========================================================================
-#     # ACTION PROCESSING
-#     # =========================================================================
-#     # =========================================================================
-#     # CONFLICT RESOLUTION
-#     # =========================================================================
-#     # All three resolvers take the same input — a list of (dist, robot_id,
-#     # task_id) requests, already filtered so every task_id refers to a task
-#     # that's real/unassigned/not obsolete/not completed at proposal time —
-#     # and return a list of (robot_id, task_id) winners. Capacity checking
-#     # happens in the caller (_process_actions) identically for all three, so
-#     # differences in outcomes are purely about *who wins a contested task*,
-#     # not about capacity semantics.
+
  
 #     def _resolve_conflicts(self, requests):
 #         if not requests:
@@ -791,13 +772,6 @@
 #         return winners
  
 #     def _resolve_conflicts_hungarian_with_bid_fn(self, requests, bid_fn):
-#         """Shared centralized-assignment machinery for any resolver that
-#         scores (robot, task) pairs with a pluggable bid_fn(robot_id,
-#         task_id) -> float, instead of distance or policy logits. Used by
-#         both _resolve_conflicts_predicted_reward and
-#         _resolve_conflicts_predicted_reward_joint. Same eligibility rule
-#         as the other hungarian variants: a robot can only be matched to a
-#         task that was actually in its own candidate list this step."""
 #         robot_ids = sorted({r for _, r, _ in requests})
 #         task_ids  = sorted({t for _, _, t in requests})
 #         R, T = len(robot_ids), len(task_ids)
@@ -840,12 +814,7 @@
 #         return winners
  
 #     def _resolve_conflicts_predicted_reward(self, requests):
-#         """Centralized assignment using predict_candidate_score() (single-
-#         candidate simulated pickup/dropoff scoring) as bid values —
-#         matches the reference repo's 'predicted_reward' resolver: the
-#         resolver reuses the exact same scoring function as the
-#         predicted_reward baseline/proposer, just as the auction's bids
-#         instead of a per-robot ranking."""
+   
 #         return self._resolve_conflicts_hungarian_with_bid_fn(
 #             requests, lambda rid, tid: self.predict_candidate_score(rid, tid)
 #         )
@@ -860,10 +829,7 @@
 #         )
  
 #     def _process_actions(self, actions) -> Dict:
-#         """
-#         Uses _last_cand_task_ids from observation-time snapshot to prevent
-#         index mismatch between policy output and candidate list.
-#         """
+    
 #         robot_ids = sorted(self.robots.keys())
 #         requests = []
  
@@ -1154,14 +1120,7 @@
 #                 invalid_action_count += 1
 #                 continue
  
-#             # capacity_method="assigned": count onboard + queued-not-yet-picked
-#             #   (conservative — reserves a seat for every task promised, even
-#             #   ones not yet physically onboard)
-#             # capacity_method="pickup": count onboard only (len(onboard_tasks))
-#             #   (permissive — allows queuing more pickups than max_capacity as
-#             #   long as physical onboard load never exceeds it; relies on
-#             #   _assign_next_stop's room_to_pickup check to enforce the real
-#             #   physical limit at pickup time)
+   
 #             if self.capacity_method == "assigned":
 #                 total_committed = (
 #                     len(robot["onboard_tasks"])
@@ -1282,23 +1241,12 @@
  
 #         candidates.sort()
 #         top_k = candidates[: self.K_max]
-
-#         # candidates_sorting='randomized' (matches reference config) keeps
-#         # the SAME selection (still the K_max closest — this only changes
-#         # which SLOT each one lands in, not which tasks are visible at
-#         # all), but shuffles slot order so the GNN can't learn a lazy
-#         # "prefer low slot index" shortcut instead of actually reasoning
-#         # about each candidate's own features. Uses self.np_random (seeded
-#         # via reset(seed=...)) for reproducibility. NOTE: any baseline that
-#         # assumes slot 0 == nearest (e.g. distance-based tie-breaks) needs
-#         # to look up actual distance explicitly instead when this is on —
-#         # see eval_baseline.py's pickup_deadline_distance_action, which
-#         # already does this correctly via task lookup rather than slot
-#         # position.
+ 
+      
 #         if self.candidates_sorting == "randomized" and len(top_k) > 1:
 #             order = self.np_random.permutation(len(top_k))
 #             top_k = [top_k[i] for i in order]
-
+ 
 #         # print(
 #         #     robot_id,
 #         #     "accepted", accepted,
@@ -1334,9 +1282,6 @@
 #         candidates.sort()
 #         return [tid for _, tid in candidates[: self.K_max]]
  
-#     # =========================================================================
-#     # TASK LIFECYCLE — deadlines
-#     # =========================================================================
  
 #     def _update_task_deadlines(self):
 #         """
@@ -1373,9 +1318,6 @@
 #                 # Picked up tasks are kept alive; lateness handled at dropoff reward.
 #                 pass
  
-#     # =========================================================================
-#     # ROBOT MOVEMENT — A* path following
-#     # =========================================================================
  
 #     def _execute_robot_movements_and_tasks(self):
 #         for robot_id, robot in self.robots.items():
@@ -1509,10 +1451,7 @@
 #             robot["target_location"]      = None
 #             robot["path"]                 = []
  
-#     # =========================================================================
-#     # OBSERVATION
-#     # =========================================================================
- 
+   
 #     def _build_observation(self) -> Dict:
 #         robot_ids = sorted(self.robots.keys())
 #         if len(robot_ids) < self.num_robots:
@@ -1547,27 +1486,7 @@
 #         self._last_cand_task_ids = cand_task_ids
 #         return obs_dict
  
-#     # =========================================================================
-#     # ROUTE-INSERTION PREDICTION (predicted_reward / predicted_reward_joint)
-#     # =========================================================================
-#     #
-#     # These simulate "what would happen if we inserted this candidate task
-#     # into this robot's route" WITHOUT mutating any real robot/task state —
-#     # used by the predicted_reward baseline/resolver (single-candidate
-#     # score) and predicted_reward_joint (marginal score: how much does
-#     # adding this candidate change the score of the WHOLE route, not just
-#     # the candidate itself).
-#     #
-#     # The simulated walk deliberately mirrors _assign_next_stop()'s
-#     # nearest-next-stop rule exactly (greedy route construction), so the
-#     # prediction is consistent with what the robot would actually do if
-#     # this candidate were assigned. One documented approximation: the walk
-#     # uses straight-line distance / movement_speed for travel time, while
-#     # real execution follows an A* path (_move_robot_toward_target) that
-#     # can be longer if obstacles are in the way — so predictions are an
-#     # estimate, not an exact replay, the same caveat the reference
-#     # implementation's own travel-time estimator carries.
- 
+    
 #     def _simulate_route_with_candidate(self, robot_id, candidate_task_id):
 #         """Greedy nearest-next-stop walk over (robot's committed stops +
 #         candidate's pickup/dropoff), starting from the robot's current
@@ -1731,13 +1650,7 @@
 #         committed_ids = list(robot["assigned_tasks"]) + list(robot["onboard_tasks"])
  
 #         def _pickup_time_for(tid, walked_pickup_time):
-#             # Already-onboard tasks were picked up in the PAST — the walk
-#             # only tracks pickup_time for stops it actually visits, and an
-#             # already-onboard task has no pickup stop left to visit, so it
-#             # would otherwise always come back as None (-> -inf score).
-#             # Use the real recorded pickup time instead; only tasks whose
-#             # pickup hasn't happened yet (queued or the candidate) get
-#             # their pickup time from the simulated walk.
+           
 #             if tid in already_onboard:
 #                 return self.tasks[tid].get("pickup_time", self.current_time)
 #             return walked_pickup_time
@@ -1778,16 +1691,14 @@
  
 #         return r_after - r_before
  
-#     # =========================================================================
 #     # REWARD
-#     # =========================================================================
- 
+   
 #     def _compute_rewards(self, action_info) -> float:
 #         reward_type = getattr(self, "reward_type", "legacy")
 #         if reward_type == "wait_travel":
 #             return self._compute_rewards_wait_travel(action_info)
 #         return self._compute_rewards_legacy(action_info)
-
+ 
 #     def _compute_rewards_legacy(self, action_info) -> float:
 #         W_COMP = self.W_COMP
 #         W_WAIT = self.W_WAIT
@@ -1803,7 +1714,6 @@
 #         r_deadline = 0.0
 #         r_obsolete = 0.0
  
-#         # 1) pickup wait penalty
 #         for r in self.robots.values():
 #             task_id = r.get("just_picked_up_task")
 #             if not task_id:
@@ -1819,7 +1729,6 @@
 #             r_wait += delta
 #             r["just_picked_up_task"] = None
  
-#         # 2) completion + lateness penalties
 #         for task in self.tasks.values():
 #             if not task.get("is_completed"):
 #                 continue
@@ -1845,7 +1754,6 @@
 #                 reward += delta
 #                 r_deadline += delta
  
-#         # 3) obsolete penalties (only not-picked tasks become obsolete by design)
 #         for task in self.tasks.values():
 #             if not task.get("is_obsolete"):
 #                 continue
@@ -1873,53 +1781,25 @@
 #         self.debug_ep_r_obsolete += float(r_obsolete)
 #         # print(self.debug_ep_r_obsolete,'debug_ep_r_obsolete')
 #         return float(reward)
-
+ 
 #     def _compute_rewards_wait_travel(self, action_info) -> float:
-#         """Matches the reference repo's reward_type: wait_travel /
-#         completion_mode: valid_dropoff. Two structural differences from
-#         _compute_rewards_legacy, both deliberate:
-
-#         1. Completion reward (W_COMP) is GATED on genuinely on-time
-#            completion (pickup AND dropoff both within their deadlines) —
-#            a late completion earns ZERO completion credit, not "completed
-#            plus a separate lateness penalty" like legacy mode. This
-#            mirrors predicted_reward's own internal valid_completion gate
-#            in _score_predicted_times, so the real reward and the
-#            heuristic baselines' own scoring now agree on what "on time"
-#            means.
-#         2. No separate continuous deadline-lateness penalty at all
-#            (matches her w_deadline: 0) — deadline compliance lives
-#            entirely in the binary gate above. In its place, a dedicated
-#            EXCESS RIDE TIME penalty (W_TRAVEL): how much longer the actual
-#            ride took than its own estimated travel time, independent of
-#            whether the deadline was hit.
-
-#         Wait penalty and obsolete-task handling are unchanged from legacy
-#         mode.
-
-#         NOTE ON DEBUG FIELDS: this mode has no "r_deadline" component at
-#         all, so — to avoid touching every downstream consumer of
-#         debug_last_r_deadline/debug_ep_r_deadline — this repurposes that
-#         SAME field to carry r_travel's value when reward_type ==
-#         "wait_travel". Its printed/logged label still says "r_dead" /
-#         "r_deadline" either way; mentally read that as "r_travel" whenever
-#         this mode is active.
-#         """
+        
 #         W_COMP = self.W_COMP
 #         W_WAIT = self.W_WAIT
 #         W_TRAVEL = getattr(self, "W_TRAVEL", 1.25)
-#         W_OBS = self.W_OBS
-
+#         completion_mode = getattr(self, "completion_mode", "dropoff")
+ 
 #         WAIT_CAP = max(1.0, float(self.max_wait_delay_s))
 #         TRAVEL_CAP = max(1.0, float(self.max_travel_delay_s))
-
+ 
 #         reward = 0.0
 #         r_comp = 0.0
 #         r_wait = 0.0
 #         r_travel = 0.0
 #         r_obsolete = 0.0
-
-#         # 1) pickup wait penalty — identical to legacy mode
+ 
+#         # 1) pickup wait penalty + "pickup" mode completion reward — both
+#         # fire on the same pickup event.
 #         for r in self.robots.values():
 #             task_id = r.get("just_picked_up_task")
 #             if not task_id:
@@ -1928,66 +1808,83 @@
 #             if task is None:
 #                 r["just_picked_up_task"] = None
 #                 continue
-
+ 
 #             wait = max(0.0, self.current_time - task["release_time"])
 #             delta = W_WAIT * (-min(wait, WAIT_CAP) / WAIT_CAP)
 #             reward += delta
 #             r_wait += delta
+ 
+#             if completion_mode == "pickup":
+#                 reward += W_COMP
+#                 r_comp += W_COMP
+ 
 #             r["just_picked_up_task"] = None
-
-#         # 2) gated completion reward + dedicated excess-ride-time penalty
+ 
+#         # 2) "dropoff"/"valid_dropoff" mode completion reward + excess-ride-
+#         # time penalty — both fire on genuine task completion (dropoff).
 #         for task in self.tasks.values():
 #             if not task.get("is_completed"):
 #                 continue
 #             if task.get("_rewarded"):
 #                 continue
 #             task["_rewarded"] = True
-
+ 
 #             pickup_time = task.get("pickup_time", self.current_time)
 #             dropoff_time = task.get("dropoff_time", self.current_time)
-
-#             valid_completion = True
-#             if task.get("pickup_deadline") is not None:
-#                 valid_completion = valid_completion and (pickup_time <= task["pickup_deadline"])
-#             if task.get("dropoff_deadline") is not None:
-#                 valid_completion = valid_completion and (dropoff_time <= task["dropoff_deadline"])
-
-#             if valid_completion:
+ 
+#             if completion_mode == "valid_dropoff":
+#                 valid_completion = True
+#                 if task.get("pickup_deadline") is not None:
+#                     valid_completion = valid_completion and (pickup_time <= task["pickup_deadline"])
+#                 if task.get("dropoff_deadline") is not None:
+#                     valid_completion = valid_completion and (dropoff_time <= task["dropoff_deadline"])
+#                 if valid_completion:
+#                     reward += W_COMP
+#                     r_comp += W_COMP
+#             elif completion_mode == "dropoff":
 #                 reward += W_COMP
 #                 r_comp += W_COMP
-
+#             # completion_mode == "pickup": already awarded above, nothing here
+ 
 #             ride_time = max(0.0, dropoff_time - pickup_time)
 #             est_travel = task.get("est_travel_time", 0.0)
 #             excess_ride = max(0.0, ride_time - est_travel)
 #             delta = W_TRAVEL * (-min(excess_ride, TRAVEL_CAP) / TRAVEL_CAP)
 #             reward += delta
 #             r_travel += delta
-
-#         # 3) obsolete penalty — unchanged structurally from legacy, minus
-#         # the extra deadline-style term.
+ 
+#         # 3) obsolete penalty — folded into wait (W_WAIT/WAIT_CAP), with a
+#         # FLOOR of 0.05 on the normalized fraction, matching her formula
+#         # exactly. No separate W_OBS term in this mode at all. Skipped
+#         # entirely (matching her code) if the task has no recorded
+#         # pickup_deadline.
 #         for task in self.tasks.values():
 #             if not task.get("is_obsolete"):
 #                 continue
 #             if task.get("_obsolete_rewarded"):
 #                 continue
 #             task["_obsolete_rewarded"] = True
-
-#             delta_obs = -W_OBS
-#             reward += delta_obs
-#             r_obsolete += delta_obs
-
+ 
+#             pickup_deadline = task.get("pickup_deadline")
+#             if pickup_deadline is None:
+#                 continue
+#             late = max(1.0, self.current_time - float(pickup_deadline))
+#             delta = W_WAIT * (-max(0.05, min(late, WAIT_CAP) / WAIT_CAP))
+#             reward += delta
+#             r_obsolete += delta  # separate accumulator, not folded into r_wait's — see docstring
+ 
 #         self.debug_last_r_comp = float(r_comp)
 #         self.debug_last_r_wait = float(r_wait)
-#         self.debug_last_r_deadline = float(r_travel)  # see NOTE in docstring above
+#         self.debug_last_r_deadline = float(r_travel)  # repurposed field — holds r_travel in this mode
 #         self.debug_last_r_obsolete = float(r_obsolete)
-
+ 
 #         self.debug_ep_r_comp += float(r_comp)
 #         self.debug_ep_r_wait += float(r_wait)
-#         self.debug_ep_r_deadline += float(r_travel)  # see NOTE in docstring above
+#         self.debug_ep_r_deadline += float(r_travel)
 #         self.debug_ep_r_obsolete += float(r_obsolete)
-
+ 
 #         return float(reward)
-
+ 
  
 #     # =========================================================================
 #     # TERMINATION
@@ -2028,6 +1925,23 @@
  
 #     def close(self):
 #         pass
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -2262,13 +2176,27 @@ class MultiAgentTaskEnv(gym.Env):
             use_ego_robot=use_ego_robot,
         )
  
+        # Resolve the EFFECTIVE edge_features list ONCE, and use this same
+        # variable everywhere below -- previously, make_feature_fn's call
+        # used `edge_features or []` (empty-list fallback) while
+        # self.edge_features used `edge_features or ["dx","dy","eta"]`
+        # (3-item fallback), for the exact same input. Whenever the
+        # caller passed edge_features=None (or omitted it), these two
+        # fallbacks silently disagreed: feature_fn computed against an
+        # empty list (returning shape-(0,) arrays) while the observation
+        # space declared 3 dimensions -- producing exactly the
+        # "could not broadcast input array from shape (0,) into shape
+        # (3,)" error confirmed directly on a real run. Single source of
+        # truth now, no duplicate/inconsistent defaulting.
+        _effective_edge_features = list(edge_features) if edge_features else ["dx", "dy", "eta"]
+
         self.feature_fn = make_feature_fn(
             env_state=self,
             use_xy_pickup=use_xy_pickup,
             normalize_features=normalize_features,
             use_node_type=use_node_type,
             use_edge_rt=use_edge_rt,
-            edge_features=edge_features or [],
+            edge_features=_effective_edge_features,
             use_ego_robot=use_ego_robot,
             max_position=self.max_position,
             max_robot_capacity=max_robot_capacity,
@@ -2276,9 +2204,9 @@ class MultiAgentTaskEnv(gym.Env):
             max_travel_delay_s=max_travel_delay_s,
             max_steps=max_steps,
         )
- 
+
         if use_edge_rt:
-            self.edge_features = edge_features or ["dx", "dy", "eta"]
+            self.edge_features = _effective_edge_features
             self.edge_feat_dim = len(self.edge_features)
         else:
             self.edge_features = []

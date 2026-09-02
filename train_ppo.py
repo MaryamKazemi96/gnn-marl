@@ -230,6 +230,7 @@ class TrainingLogCallback(BaseCallback):
 
             if not self._edge_logged:
                 edge_attr = new_obs.get("edge_attr") if isinstance(new_obs, dict) else None
+                edge_mask = new_obs.get("edge_mask") if isinstance(new_obs, dict) else None
                 if edge_attr is not None:
                     try:
                         if hasattr(edge_attr, "detach"):
@@ -237,7 +238,36 @@ class TrainingLogCallback(BaseCallback):
                         ea = np.asarray(edge_attr)
                         if ea.ndim >= 2 and ea.shape[-1] > 0:
                             n_dims = ea.shape[-1]
-                            slice_ea = ea.reshape(-1, n_dims)
+
+                            # Filter out padding (E_max slots with no real
+                            # edge) via edge_mask before computing stats.
+                            # Without this, a small real edge count against
+                            # a much larger E_max budget gets swamped by
+                            # correctly-zero padding, making this check
+                            # report near-zero variance even when the real
+                            # edges have perfectly healthy values — found
+                            # and confirmed on a real smoke-test run: the
+                            # unmasked version always reported
+                            # mean=std=0 regardless of actual edge health,
+                            # since E_max=64 padding slots vastly
+                            # outnumbered the handful of real edges in a
+                            # small-fleet, small-K_max setup.
+                            if edge_mask is not None:
+                                if hasattr(edge_mask, "detach"):
+                                    edge_mask = edge_mask.detach().cpu().numpy()
+                                em = np.asarray(edge_mask).reshape(-1).astype(bool)
+                                slice_ea_full = ea.reshape(-1, n_dims)
+                                if em.shape[0] == slice_ea_full.shape[0]:
+                                    slice_ea = slice_ea_full[em]
+                                else:
+                                    # shape mismatch (shouldn't normally
+                                    # happen) — fall back to unmasked
+                                    # rather than crash, but this means
+                                    # the stats below still include padding
+                                    slice_ea = slice_ea_full
+                            else:
+                                slice_ea = ea.reshape(-1, n_dims)
+
                             if slice_ea.size > 0:
                                 if not self._edge_stats_initialized:
                                     self._edge_sum = np.zeros((n_dims,), dtype=np.float64)

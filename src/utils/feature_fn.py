@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 import numpy as np
 from typing import Any, Optional, Tuple, List, cast
@@ -258,19 +257,30 @@ def make_feature_fn(
             px, py = _task_xy(task_id, is_pickup=True)
             tx_do, ty_do = _task_xy(task_id, is_pickup=False)
             
-            # Displacement from robot to task pickup
-            dx = float(px - rx)
-            dy = float(py - ry)
-            if normalize_features:
-                dx /= pos_scale
-                dy /= pos_scale
-            
-            # Estimated arrival time (ETA) - simple Euclidean distance / speed
-            dist = np.sqrt(dx**2 + dy**2)
-            speed = 5.0  # m/s (adjust to your simulation)
+            # Displacement from robot to task pickup — keep the RAW
+            # (unnormalized) values around for the eta computation below,
+            # since using already-normalized dx/dy there was a real bug:
+            # dist = sqrt(dx^2+dy^2) computed from POSITION-normalized
+            # dx/dy is dimensionless, but speed=5.0 is a real-world m/s
+            # constant — dividing the two together, then normalizing the
+            # RESULT by travel_scale again, silently compressed eta by an
+            # extra factor of exactly pos_scale (confirmed: ~40x too
+            # small with vicinity_m=40, verified against a real example).
+            raw_dx = float(px - rx)
+            raw_dy = float(py - ry)
+
+            # Estimated arrival time (ETA) - simple Euclidean distance / speed,
+            # computed from RAW displacement, not the normalized version.
+            dist = np.sqrt(raw_dx**2 + raw_dy**2)
+            speed = 1.0  # m/s (adjust to your simulation)
             eta = dist / speed if speed > 0 else 0.0
             if normalize_features:
                 eta = float(np.clip(eta / travel_scale, 0.0, 1.0))
+
+            dx, dy = raw_dx, raw_dy
+            if normalize_features:
+                dx /= pos_scale
+                dy /= pos_scale
             
             # Route slot features (if enabled)
             slot_values: dict[str, float] = {}
